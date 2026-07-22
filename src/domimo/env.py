@@ -13,7 +13,12 @@
     每个数字已打出的牌数 / (max_pip+1)                               7
     手数 len(history) / (2*deck)（截断到 1）                        1
     自己的绝对座位 one-hot（先手位信息）                              4
-    预留（置 0，后续加历史特征）                                     39
+    -- 记牌特征（v2 新增，占用原预留位） --
+    自己手牌每个数字的张数 / (max_pip+1)                              7
+    未见牌（不在我手、未打出）每个数字的张数 / (max_pip+1)             7
+    连续 pass 数 / (num_players-1)                                  1
+    自己手牌点数和 / (max_pip*2*hand_size)                          1
+    预留（置 0，后续加历史特征）                                     23
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ import numpy as np
 from .config import GameConfig
 from .engine import DominoEngine
 
-RESERVED_DIMS = 39
+RESERVED_DIMS = 23
 
 
 def obs_size(cfg: GameConfig) -> int:
@@ -36,6 +41,8 @@ def obs_size(cfg: GameConfig) -> int:
         + (mp + 1)
         + 1
         + n
+        + 2 * (mp + 1)  # 记牌特征：自己/未见 每数字张数
+        + 2             # 连续 pass 数 + 手牌点数和
         + RESERVED_DIMS
     )
 
@@ -100,6 +107,26 @@ def encode_obs(eng: DominoEngine, out: np.ndarray | None = None) -> np.ndarray:
     # 绝对座位
     out[i + p] = 1.0
     i += n
+    # 记牌特征：自己手牌 / 未见牌 每个数字的张数
+    pip_sum_mine = 0
+    for t in range(deck):
+        a, b = eng.pips[t]
+        if (hand >> t) & 1:
+            out[i + a] += 1.0
+            if b != a:
+                out[i + b] += 1.0
+            pip_sum_mine += a + b
+        elif not (played >> t) & 1:  # 未见
+            out[i + (mp + 1) + a] += 1.0
+            if b != a:
+                out[i + (mp + 1) + b] += 1.0
+    for d in range(2 * (mp + 1)):
+        out[i + d] /= mp + 1
+    i += 2 * (mp + 1)
+    # 连续 pass 数、手牌点数和
+    out[i] = eng.consecutive_passes / max(n - 1, 1)
+    out[i + 1] = pip_sum_mine / (cfg.max_pip * 2 * cfg.hand_size)
+    i += 2
     # 预留 RESERVED_DIMS 维保持 0
     return out
 
