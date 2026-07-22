@@ -14,7 +14,7 @@ CFG = GameConfig()
 
 
 def test_obs_size_default():
-    assert obs_size(CFG) == 148
+    assert obs_size(CFG) == 204
 
 
 def test_obs_hand_and_played_sections():
@@ -88,6 +88,23 @@ def test_obs_no_hidden_info():
         assert np.array_equal(encode_obs(eng), o1)
 
 
+def test_obs_playability_features():
+    """可接性特征段与两端点数一致。"""
+    eng = DominoEngine(CFG)
+    eng.reset(seed=4)
+    (a0,) = eng.legal_actions_list()
+    eng.step(a0)
+    obs = encode_obs(eng)
+    base = 148  # v3 可接性段起点（见 env.py 布局）
+    l, r = eng.left_end, eng.right_end
+    for t in range(28):
+        from domimo.tiles import TILE_PIPS
+
+        a, b = TILE_PIPS[t]
+        assert obs[base + t] == float(a == l or b == l)
+        assert obs[base + 28 + t] == float(a == r or b == r)
+
+
 def test_legal_mask_matches_engine():
     rng = random.Random(3)
     eng = DominoEngine(CFG)
@@ -105,7 +122,7 @@ def test_env_full_episode():
     env = DominoEnv(CFG)
     rng = random.Random(0)
     obs, mask, player = env.reset(seed=5)
-    assert obs.shape == (148,) and mask.shape == (57,)
+    assert obs.shape == (204,) and mask.shape == (57,)
     steps = 0
     while True:
         action = rng.choice(np.flatnonzero(mask).tolist())
@@ -121,7 +138,7 @@ def test_env_full_episode():
 def test_obs_reuse_buffer():
     eng = DominoEngine(CFG)
     eng.reset(seed=0)
-    buf = np.ones(148, dtype=np.float32) * 9.0
+    buf = np.ones(204, dtype=np.float32) * 9.0
     out = encode_obs(eng, out=buf)
     assert out is buf
     assert np.array_equal(buf, encode_obs(eng))

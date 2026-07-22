@@ -18,7 +18,11 @@
     未见牌（不在我手、未打出）每个数字的张数 / (max_pip+1)             7
     连续 pass 数 / (num_players-1)                                  1
     自己手牌点数和 / (max_pip*2*hand_size)                          1
+    -- 可接性特征（v3 新增） --
+    每张牌当前能否接左端 / 能否接右端（无论在谁手里）              2*28=56
     预留（置 0，后续加历史特征）                                     23
+
+双六默认配置下 v3 obs 维度 = 204。
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ def obs_size(cfg: GameConfig) -> int:
         + n
         + 2 * (mp + 1)  # 记牌特征：自己/未见 每数字张数
         + 2             # 连续 pass 数 + 手牌点数和
+        + 2 * deck      # 可接性：每张牌能否接左/右
         + RESERVED_DIMS
     )
 
@@ -127,6 +132,19 @@ def encode_obs(eng: DominoEngine, out: np.ndarray | None = None) -> np.ndarray:
     out[i] = eng.consecutive_passes / max(n - 1, 1)
     out[i + 1] = pip_sum_mine / (cfg.max_pip * 2 * cfg.hand_size)
     i += 2
+    # 可接性：每张牌能否接左端 / 右端（桌面为空时全部可接）
+    l, r = eng.left_end, eng.right_end
+    for t in range(deck):
+        a, b = eng.pips[t]
+        if l < 0:
+            out[i + t] = 1.0
+            out[i + deck + t] = 1.0
+        else:
+            if a == l or b == l:
+                out[i + t] = 1.0
+            if a == r or b == r:
+                out[i + deck + t] = 1.0
+    i += 2 * deck
     # 预留 RESERVED_DIMS 维保持 0
     return out
 
