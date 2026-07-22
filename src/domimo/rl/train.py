@@ -44,6 +44,10 @@ class TrainConfig:
     eval_games: int = 2000
     out_dir: str = "runs/ppo"
     seed: int = 0
+    lr_anneal: bool = False        # lr 线性退火到 10%
+    entropy_anneal_to: float = -1.0  # >=0 时熵系数线性退火到该值
+    init_from: str | None = None   # 从已有 checkpoint 热启动
+    opponent_mix_prob: float = 0.0  # 部分对局混入 counting 锚点对手的概率
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
 
@@ -78,6 +82,10 @@ def train(cfg: TrainConfig) -> str:
     config = GameConfig()
 
     model = DominoNet(obs_size(config), config.num_actions, cfg.hidden_sizes)
+    if cfg.init_from:
+        ckpt = torch.load(cfg.init_from, map_location="cpu", weights_only=True)
+        model.load_state_dict(ckpt.get("model", ckpt))
+        print(f"热启动自 {cfg.init_from}")
     updater = PPOUpdater(model, cfg.ppo)
 
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -92,8 +100,22 @@ def train(cfg: TrainConfig) -> str:
     total_games = 0
     total_steps = 0
 
+    lr0 = cfg.ppo.learning_rate
+    ent0 = cfg.ppo.entropy_coef
+
     with ProcessPoolExecutor(max_workers=cfg.n_workers) as pool:
         for it in range(1, n_iters + 1):
+            # 线性退火
+            frac = (it - 1) / max(n_iters - 1, 1)
+            if cfg.lr_anneal:
+                lr = lr0 * (1.0 - 0.9 * frac)
+                for g in updater.optimizer.param_groups:
+                    g["lr"] = lr
+            if cfg.entropy_anneal_to >= 0.0:
+                updater.cfg.entropy_coef = (
+                    ent0 + (cfg.entropy_anneal_to - ent0) * frac
+                )
+
             t0 = time.perf_counter()
             state = {k: v.cpu() for k, v in model.state_dict().items()}
             futures = [
@@ -108,6 +130,7 @@ def train(cfg: TrainConfig) -> str:
                     gamma=cfg.gamma,
                     gae_lambda=cfg.gae_lambda,
                     hidden_sizes=cfg.hidden_sizes,
+                    opponent_mix_prob=cfg.opponent_mix_prob,
                 )
                 for w in range(cfg.n_workers)
             ]
@@ -183,6 +206,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--entropy-coef", type=float, default=0.01)
     ap.add_argument("--eval-every", type=int, default=20)
+    ap.add_argument("--lr-anneal", action="store_true")
+    ap.add_argument("--entropy-anneal-to", type=float, default=-1.0)
+    ap.add_argument("--init-from", type=str, default=None, help="从 checkpoint 继续训练")
+    ap.add_argument("--opponent-mix", type=float, default=0.0, help="混入counting对手的对局比例")
     ap.add_argument("--smoke", action="store_true", help="快速冒烟（少量对局）")
     args = ap.parse_args()
 
@@ -193,7 +220,11 @@ def main() -> None:
         seed=args.seed,
         eval_every_iters=args.eval_every,
         out_dir=args.out or f"runs/ppo_seed{args.seed}_{int(time.time())}",
+        lr_anneal=args.lr_anneal,
+        entropy_anneal_to=args.entropy_anneal_to,
         ppo=PPOConfig(learning_rate=args.lr, entropy_coef=args.entropy_coef),
+        init_from=args.init_from,
+        opponent_mix_prob=args.opponent_mix,
     )
     if args.smoke:
         cfg.total_games = 4096

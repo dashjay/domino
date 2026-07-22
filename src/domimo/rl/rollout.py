@@ -107,22 +107,50 @@ def collect_rollout(
     gamma: float = 1.0,
     gae_lambda: float = 0.95,
     hidden_sizes: tuple[int, ...] = (256, 256, 128),
+    opponent_mix_prob: float = 0.0,
 ) -> RolloutBatch:
-    """跑满 n_games 局自博弈，返回训练 batch。可在子进程中调用。"""
+    """跑满 n_games 局自博弈，返回训练 batch。可在子进程中调用。
+
+    opponent_mix_prob > 0 时，每局以该概率抽 1~(n-1) 个座位交给 counting
+    启发式执棋（锚点对手），只记录 NN 座位的轨迹——防自博弈漂移、
+    直接优化对抗启发式的能力。
+    """
     torch.set_num_threads(1)
+
+    from ..agents import CountingAgent
 
     model = DominoNet(obs_size(config), config.num_actions, hidden_sizes)
     model.load_state_dict(state_dict)
     model.eval()
 
     rng = random.Random(seed)
+    n = config.num_players
+    heuristic = CountingAgent()
+
+    def sample_nn_seats() -> list[bool]:
+        """每局决定哪些座位由 NN 控制。"""
+        if opponent_mix_prob > 0 and rng.random() < opponent_mix_prob:
+            n_opp = rng.randint(1, n - 1)
+            opp_seats = set(rng.sample(range(n), n_opp))
+            return [s not in opp_seats for s in range(n)]
+        return [True] * n
+
     K = min(n_parallel_envs, n_games)
     engines = [DominoEngine(config) for _ in range(K)]
+    nn_seats: list[list[bool]] = [sample_nn_seats() for _ in range(K)]
     trajs: list[list[_PlayerTraj]] = [
         [_PlayerTraj() for _ in range(config.num_players)] for _ in range(K)
     ]
-    for eng in engines:
+
+    def advance_heuristics(k: int) -> None:
+        """把引擎 k 推进到下一个 NN 决策点（或终局）。"""
+        eng = engines[k]
+        while not eng.is_over and not nn_seats[k][eng.current_player]:
+            eng.step(heuristic.act(eng))
+
+    for k, eng in enumerate(engines):
         eng.reset(seed=rng.randrange(1 << 30))
+        advance_heuristics(k)
 
     out: dict[str, list] = {
         k: [] for k in ("obs", "mask", "action", "logp", "value", "adv", "ret")
@@ -163,6 +191,7 @@ def collect_rollout(
             tr.logp.append(logps[row])
             tr.value.append(values[row])
             eng.step(actions[row])
+            advance_heuristics(k)
 
             if eng.is_over:
                 scores = eng.scores()
@@ -176,6 +205,8 @@ def collect_rollout(
                 ]
                 if games_launched < n_games:
                     eng.reset(seed=rng.randrange(1 << 30))
+                    nn_seats[k] = sample_nn_seats()
+                    advance_heuristics(k)
                     games_launched += 1
                     next_active.append(k)
             else:
