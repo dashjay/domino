@@ -40,13 +40,18 @@ def main() -> None:
     args = ap.parse_args()
 
     agents = [make_agent(s, seed=args.seed + i) for i, s in enumerate(args.agents)]
+    workers = args.workers
+    if any(s.startswith("nn:") for s in args.agents) and (workers or 4) > 1:
+        # torch 模型经 fork 到子进程可能死锁（OpenMP after-fork），NN 评估强制单进程
+        workers = 1
+        print("[提示] 含 NN agent，已强制单进程评估（避免 fork+torch 死锁）")
     t0 = time.perf_counter()
     result = run_match(
         agents,
         n_games=args.n_games,
         seed=args.seed,
         config=GameConfig(),
-        n_workers=args.workers,
+        n_workers=workers,
     )
     dt = time.perf_counter() - t0
     print(result.report())

@@ -30,9 +30,19 @@ class NNAgent(Agent):
             ckpt = checkpoint
         state = ckpt.get("model", ckpt)
         hidden = tuple(ckpt.get("hidden_sizes", (256, 256, 128)))
-        self.model = DominoNet(
-            obs_size(self.config), self.config.num_actions, hidden
-        )
+        cur_obs = obs_size(self.config)
+        ckpt_obs = state["encoder.0.weight"].shape[1]
+        # 兼容 obs v2（148 维，无可接性段）的旧 checkpoint：
+        # 新布局 = [125 特征][56 可接性][23 预留]，旧 = [125 特征][23 预留(恒0)]
+        self._obs_slice = None
+        if ckpt_obs != cur_obs:
+            if ckpt_obs == cur_obs - 2 * self.config.deck_size:
+                self._obs_slice = ckpt_obs - 23  # 取前 125 维，后 23 维补 0
+            else:
+                raise ValueError(
+                    f"checkpoint obs 维度 {ckpt_obs} 与当前 {cur_obs} 不兼容"
+                )
+        self.model = DominoNet(ckpt_obs, self.config.num_actions, hidden)
         self.model.load_state_dict(state)
         self.model.eval()
         self.greedy = greedy
@@ -50,7 +60,12 @@ class NNAgent(Agent):
             return legal[0]
         encode_obs(eng, out=self._obs_buf)
         legal_mask(eng, out=self._mask_buf)
-        obs = torch.from_numpy(self._obs_buf).unsqueeze(0)
+        if self._obs_slice is not None:
+            old = np.zeros(self.model.obs_size, dtype=np.float32)
+            old[: self._obs_slice] = self._obs_buf[: self._obs_slice]
+            obs = torch.from_numpy(old).unsqueeze(0)
+        else:
+            obs = torch.from_numpy(self._obs_buf).unsqueeze(0)
         mask = torch.from_numpy(self._mask_buf).unsqueeze(0)
         with torch.no_grad():
             logits, _ = self.model(obs, mask)

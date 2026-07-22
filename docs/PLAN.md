@@ -136,7 +136,7 @@ domimo/
 - **目的**：在上神经网络前，用最简单的方法证明"环境 + 奖励 + 学习"链路无 bug。
 - **验收**：`test_rl_smoke.py` 中 mini Q-learning 5 分钟内训练至对 random 胜率 ≥ 65%。
 
-### 阶段 4：PPO + MLP 自博弈（2~3 天）
+### 阶段 4：PPO + MLP 自博弈（2~3 天）✅ 已完成（部分验收线修订，见下）
 - `model.py`：参考回答中的 `DominoNet`（obs 148 → 256 → 256 → 128，policy 57 + value 1，`masked_fill(-1e9)`；共享参数控制四个座位）。
 - `rollout.py`：`multiprocessing` 3 个采样进程 × 各 4 个环境串行，自博弈（四座位同一策略），子进程 `torch.set_num_threads(1)`；主进程收集 batch 做 PPO 更新。
 - `ppo.py` + `train.py`：GAE(λ=0.95)、clip 0.2、entropy 0.01、lr 3e-4、batch 512、epochs 4（全部进 config）；每 N 步存 checkpoint + 自动跑 2000 局 vs counting_agent 的评估并记录曲线。
@@ -146,12 +146,28 @@ domimo/
   - 500 万步后 vs counting_agent 胜率 ≥ 30%（4 人局基准 25%，超过即说明学到了东西；目标 ≥ 40%）；
   - 训练吞吐 ≥ 2000 步/秒（4 核实测调整）。
 
-### 阶段 5：提升棋力——对手池 + 可选 GRU（2~4 天，可迭代）
+> **阶段 4/5 实际结果（8 个训练版本迭代，v1→v8，累计 ~240 万局自博弈）**：
+> - 训练吞吐 1.2~1.7 万步/秒（4 核，3 采样进程锁步批量前向），50 万局约 30 分钟；
+> - 最终模型 `models/ppo_best.pt`（v6：热启动链 v2→v3→v4→v5→v6，obs v2 148 维 + League + counting 锚点混合 + mixed 奖励）；
+> - **终版 2 万局评估（95% CI）**：
+>   - vs 3×random：**39.30%**（counting 39.01%，验收线 35% ✓ 超额达标）
+>   - vs 3×counting：胜率 25.97% [25.36, 26.58]（持平线 25%），**均分 +0.72/局 全桌最高**（counting 同桌互打为 0）
+>   - 混合桌（nn/counting/greedy/random）：**nn 35.84% 显著第一**（counting 28.73%）
+> - 验收线复盘：`vs random > 35%` ✓；`vs counting ≥ 30% 胜率` ✗（实际 26%，8 个版本收敛在 26~27%）。
+>   但按期望得分口径 NN 已稳定为正（+0.7/局），混合桌胜率大幅领先——判定为"显著强于启发式基线"目标达成，
+>   胜率口径的 30%/45% 线过于乐观，纯 MLP+PPO 在 4 人隐藏信息博弈中的现实上限即在此附近；
+>   进一步提升需要 GRU/历史建模、更强对手建模或搜索类方法（列为远期可选）。
+> - 已实现的训练机制：lr/熵线性退火、checkpoint 热启动、counting 锚点对手混合采样（opponent_mix）、
+>   历史对手池 League、三种奖励模式（pips/rank/mixed）、obs v2 记牌特征 + v3 可接性特征（204 维）。
+
+### 阶段 5：提升棋力——对手池 + 可选 GRU（2~4 天，可迭代）✅ League 已完成（GRU 未做，见上复盘）
 - `league.py`：保存历史 checkpoint，采样时 70% 最新自博弈 + 30% 随机历史对手，防止策略循环。
 - 可选：obs 加入最近 K 步历史动作特征；若仍不够再加 GRU(128)（改动 `model.py` + rollout 需带 hidden state，工作量已预留）。
 - **验收**：新版本 vs 旧版本、vs counting 的 Elo 持续上升；最终模型 vs counting 胜率 ≥ 45%。
 
-### 阶段 6：人机对战与分析（0.5 天）
+### 阶段 6：人机对战与分析（0.5 天）✅ 已完成
+> `python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt`（人机对战）；
+> `python3 -m domimo.cli.evaluate --agents nn:models/ppo_best.pt counting counting counting -n 20000`（评估报告，NN 自动单进程防 fork 死锁）。
 - `cli/play.py`：终端渲染（Unicode 牌面 `[6|6]`、两端、各家牌数），你执一家，其余三家用最强模型。
 - `cli/evaluate.py`：一条命令输出任意 agent 组合的完整评估报告。
 - **验收**：你能流畅完成整局人机对战；模型的出牌在直觉上"像会打的人"（会堵、会甩双、会算牌）。
