@@ -105,14 +105,15 @@ domimo/
 
 ## 3. 分阶段任务
 
-### 阶段 0：项目骨架（0.5 天）
+### 阶段 0：项目骨架（0.5 天）✅ 已完成
 - **将本计划写入仓库 `docs/PLAN.md`**（用户要求把 plan 落到本地仓库），后续阶段推进时同步更新状态。
 - 建目录、`pyproject.toml`、安装 `torch`（CPU 版）、`pytest`、`tqdm`、`matplotlib`。
 - **验收**：`docs/PLAN.md` 已提交；`pip install -e .` 成功，`pytest` 跑通空测试。
 
 > 用户已确认：规则细节不逐条回答，全部按第 1 节默认假设实现为 GameConfig 配置开关。
 
-### 阶段 1：规则引擎 + 单元测试（核心，1~2 天）
+### 阶段 1：规则引擎 + 单元测试（核心，1~2 天）✅ 已完成
+> 实际结果：38 个单测全绿（含 1 万局 fuzz 守恒检查）；基准 11,966 局/秒（单核），超过 1 万局/秒验收线。
 - `tiles.py`：`tile_id(a,b)`、`TILE_PIPS`、`pip_sum(mask)`、位图增删查。
 - `config.py`：`GameConfig`（第 1 节全部开关 + `max_pip`、`hand_size`、`num_players`，支持双三 mini 版）。
 - `engine.py`：`DominoEngine` 类——`reset(seed)` 发牌；`legal_actions() -> int64 掩码`；`step(action)`（含 pass 合法性校验、pass 时记录该玩家缺的两端数字→喂给 obs 推断特征）；`is_over / scores()`（出完 & 堵死两种终局、平局规则）。状态全部是 int / 小数组，**不建对象**。
