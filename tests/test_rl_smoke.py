@@ -7,6 +7,7 @@
 
 import random
 
+import numpy as np
 import pytest
 
 from domimo.agents import RandomAgent
@@ -75,3 +76,72 @@ def test_q_learning_beats_counting_heuristic():
         n_workers=1,
     )
     assert r.win_rates[0] > 0.50, f"未能击败启发式: {r.win_rates[0]:.2%}"
+
+
+# ---------------------------------------------------------------------------
+# 阶段 4：PPO 管道冒烟
+# ---------------------------------------------------------------------------
+
+def test_rollout_batch_shapes_and_gae():
+    """采样 batch 形状一致、mask 与动作合法、GAE 数值有限。"""
+    import torch
+
+    from domimo.config import GameConfig
+    from domimo.env import obs_size
+    from domimo.rl.model import DominoNet
+    from domimo.rl.rollout import collect_rollout
+
+    torch.manual_seed(0)
+    cfg = GameConfig()
+    model = DominoNet(obs_size(cfg), cfg.num_actions)
+    b = collect_rollout(
+        model.state_dict(), cfg, n_games=32, seed=0, n_parallel_envs=8
+    )
+    n = len(b.action)
+    assert b.n_games == 32
+    assert b.obs.shape == (n, obs_size(cfg))
+    assert b.mask.shape == (n, cfg.num_actions)
+    for arr in (b.logp, b.value, b.adv, b.ret):
+        assert arr.shape == (n,)
+        assert np.isfinite(arr).all()
+    # 每个动作都必须在 mask 允许范围内
+    assert all(b.mask[i, b.action[i]] == 1.0 for i in range(n))
+    # 自博弈零和：4 座位共享策略，座位 0 均分应接近 0
+    assert abs(b.mean_score_p0) < 6.0
+
+
+@pytest.mark.slow
+def test_ppo_smoke_learns_above_random():
+    """小规模 PPO（8k 局）应把 vs random 胜率拉到 25% 基准之上。"""
+    import shutil
+    import tempfile
+
+    from domimo.rl.ppo import PPOConfig
+    from domimo.rl.train import TrainConfig, train, evaluate
+    from domimo.rl.model import DominoNet
+    from domimo.config import GameConfig
+    from domimo.env import obs_size
+
+    import torch
+
+    out_dir = tempfile.mkdtemp(prefix="ppo_smoke_")
+    try:
+        cfg = TrainConfig(
+            total_games=8192,
+            games_per_iter=1024,
+            n_workers=2,
+            eval_every_iters=8,
+            eval_games=400,
+            out_dir=out_dir,
+            seed=0,
+            ppo=PPOConfig(),
+        )
+        best = train(cfg)
+        ckpt = torch.load(best, map_location="cpu", weights_only=True)
+        game_cfg = GameConfig()
+        model = DominoNet(obs_size(game_cfg), game_cfg.num_actions)
+        model.load_state_dict(ckpt["model"])
+        wr, _ = evaluate(model, game_cfg, 2000, (256, 256, 128), "random")
+        assert wr > 0.27, f"8k 局 PPO 后 vs random 仅 {wr:.2%}，训练管道疑似有 bug"
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
