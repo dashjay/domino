@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "domimo"
+version = "0.1.0"
+description = "双六多米诺（Gaple）规则引擎、基线机器人与强化学习训练管道"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+rl = [
+    "torch>=2.2",
+]
+dev = [
+    "pytest>=8.0",
+    "matplotlib>=3.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
