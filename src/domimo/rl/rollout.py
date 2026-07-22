@@ -64,10 +64,31 @@ class _PlayerTraj:
         self.value: list[float] = []
 
 
+def _game_rewards(
+    scores: list[float], reward_norm: float, reward_mode: str, winner: int
+) -> list[float]:
+    """局终奖励向量。
+
+    - "pips"：归一化分差（默认，优化期望得分）；
+    - "rank"：胜 +1 / 负 -1/(n-1)（直接优化胜率）；
+    - "mixed"：rank 为主 + 小比例 pips 塑形（兼顾胜率与少输分）。
+    """
+    n = len(scores)
+    if reward_mode == "pips":
+        return [s / reward_norm for s in scores]
+    rank = [
+        (1.0 if p == winner else -1.0 / (n - 1)) if winner >= 0 else 0.0
+        for p in range(n)
+    ]
+    if reward_mode == "rank":
+        return rank
+    # mixed
+    return [r + s / (reward_norm * 4) for r, s in zip(rank, scores)]
+
+
 def _finalize_game(
     trajs: list[_PlayerTraj],
-    scores: list[float],
-    reward_norm: float,
+    rewards: list[float],
     gamma: float,
     gae_lambda: float,
     out: dict[str, list],
@@ -77,7 +98,7 @@ def _finalize_game(
         T = len(tr.action)
         if T == 0:
             continue
-        reward = scores[p] / reward_norm  # 只有终局奖励
+        reward = rewards[p]  # 只有终局奖励
         adv = np.zeros(T, dtype=np.float32)
         last_gae = 0.0
         for t in reversed(range(T)):
@@ -109,6 +130,7 @@ def collect_rollout(
     hidden_sizes: tuple[int, ...] = (256, 256, 128),
     opponent_mix_prob: float = 0.0,
     opponent_state: dict | None = None,
+    reward_mode: str = "pips",
 ) -> RolloutBatch:
     """跑满 n_games 局自博弈，返回训练 batch。可在子进程中调用。
 
@@ -221,8 +243,11 @@ def collect_rollout(
             if eng.is_over:
                 scores = eng.scores()
                 score_p0_sum += scores[0]
+                rewards = _game_rewards(
+                    scores, reward_norm, reward_mode, eng.winner
+                )
                 _finalize_game(
-                    trajs[k], scores, reward_norm, gamma, gae_lambda, out
+                    trajs[k], rewards, gamma, gae_lambda, out
                 )
                 games_done += 1
                 trajs[k] = [

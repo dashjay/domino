@@ -38,6 +38,7 @@ class TrainConfig:
     n_workers: int = 3                  # 采样进程数（4 核留 1 核给主进程）
     n_parallel_envs: int = 16           # 每个 worker 内锁步引擎数
     reward_norm: float = 30.0
+    reward_mode: str = "pips"      # pips / rank / mixed
     gamma: float = 1.0
     gae_lambda: float = 0.95
     hidden_sizes: tuple[int, ...] = (256, 256, 128)
@@ -144,6 +145,7 @@ def train(cfg: TrainConfig) -> str:
                     opponent_state=(
                         league.sample_opponent() if league is not None else None
                     ),
+                    reward_mode=cfg.reward_mode,
                 )
                 for w in range(cfg.n_workers)
             ]
@@ -224,6 +226,7 @@ def main() -> None:
     ap.add_argument("--init-from", type=str, default=None, help="从 checkpoint 继续训练")
     ap.add_argument("--opponent-mix", type=float, default=0.0, help="混入counting对手的对局比例")
     ap.add_argument("--league", action="store_true", help="启用历史对手池")
+    ap.add_argument("--reward-mode", type=str, default="pips", choices=["pips", "rank", "mixed"])
     ap.add_argument("--smoke", action="store_true", help="快速冒烟（少量对局）")
     args = ap.parse_args()
 
@@ -240,6 +243,7 @@ def main() -> None:
         init_from=args.init_from,
         opponent_mix_prob=args.opponent_mix,
         league=args.league,
+        reward_mode=args.reward_mode,
     )
     if args.smoke:
         cfg.total_games = 4096
