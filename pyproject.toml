@@ -27,3 +27,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: 耗时较长的测试（默认仍会运行；可用 -m 'not slow' 跳过）",
+]

@@ -129,7 +129,8 @@ domimo/
 - `arena.py`：`run_match(agents, n_games, seed, rotate_seats=True)` 多进程批量对局，输出胜率、平均得分、95% 置信区间、Elo。
 - **验收**：10 万局竞技场几分钟内跑完；棋力排序稳定呈 `counting > greedy > random`（counting 对 random 胜率应 ≥ 40%（4 人局基准 25%），若不满足则迭代启发式）。
 
-### 阶段 3：Mini-Domino 表格法验证 RL 管道（1 天）
+### 阶段 3：Mini-Domino 表格法验证 RL 管道（1 天）✅ 已完成
+> 实际结果：mini 版调整为每人 4 张（3 张时运气占比过高，启发式上限仅 54.6%）。表格 Q-learning 50 万局自博弈（19 秒、Q 表 7,578 状态）后：vs random 胜率 **65.5%**（验收线 65% PASS）、vs counting 启发式 **54.0%**——学到了真策略，管道验证通过。冒烟测试含"状态键无隐藏信息泄露"用例。
 - `GameConfig(max_pip=3, hand_size=3, num_players=2)`：10 张牌、状态空间可枚举。
 - `tabular_q.py`：Q-learning 自博弈；训练后对 random 胜率显著 > 50%，且策略在若干手工构造局面上可解释（能主动堵牌）。
 - **目的**：在上神经网络前，用最简单的方法证明"环境 + 奖励 + 学习"链路无 bug。
