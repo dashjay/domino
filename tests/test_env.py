@@ -95,7 +95,8 @@ def test_obs_playability_features():
     (a0,) = eng.legal_actions_list()
     eng.step(a0)
     obs = encode_obs(eng)
-    base = 148  # v3 可接性段起点（见 env.py 布局）
+    # v3 可接性段起点：56+16+4+21+7+1+4+14+2 = 125（见 env.py 布局）
+    base = 125
     l, r = eng.left_end, eng.right_end
     for t in range(28):
         from domimo.tiles import TILE_PIPS
