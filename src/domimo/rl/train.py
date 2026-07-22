@@ -25,6 +25,7 @@ from ..agents.nn_agent import NNAgent
 from ..arena import run_match
 from ..config import GameConfig
 from ..env import obs_size
+from .league import OpponentLeague
 from .model import DominoNet
 from .ppo import PPOConfig, PPOUpdater
 from .rollout import RolloutBatch, collect_rollout
@@ -47,7 +48,9 @@ class TrainConfig:
     lr_anneal: bool = False        # lr 线性退火到 10%
     entropy_anneal_to: float = -1.0  # >=0 时熵系数线性退火到该值
     init_from: str | None = None   # 从已有 checkpoint 热启动
-    opponent_mix_prob: float = 0.0  # 部分对局混入 counting 锚点对手的概率
+    opponent_mix_prob: float = 0.0  # 部分对局混入锚点/历史对手的概率
+    league: bool = False            # 启用对手池（历史checkpoint采样）
+    league_add_every: int = 50      # 每多少次迭代把当前策略加入对手池
     ppo: PPOConfig = field(default_factory=PPOConfig)
 
 
@@ -102,6 +105,11 @@ def train(cfg: TrainConfig) -> str:
 
     lr0 = cfg.ppo.learning_rate
     ent0 = cfg.ppo.entropy_coef
+    league = (
+        OpponentLeague(os.path.join(cfg.out_dir, "league"), seed=cfg.seed)
+        if cfg.league
+        else None
+    )
 
     with ProcessPoolExecutor(max_workers=cfg.n_workers) as pool:
         for it in range(1, n_iters + 1):
@@ -118,6 +126,8 @@ def train(cfg: TrainConfig) -> str:
 
             t0 = time.perf_counter()
             state = {k: v.cpu() for k, v in model.state_dict().items()}
+            if league is not None and (it == 1 or it % cfg.league_add_every == 0):
+                league.add(state, tag=f"it{it:05d}")
             futures = [
                 pool.submit(
                     collect_rollout,
@@ -131,6 +141,9 @@ def train(cfg: TrainConfig) -> str:
                     gae_lambda=cfg.gae_lambda,
                     hidden_sizes=cfg.hidden_sizes,
                     opponent_mix_prob=cfg.opponent_mix_prob,
+                    opponent_state=(
+                        league.sample_opponent() if league is not None else None
+                    ),
                 )
                 for w in range(cfg.n_workers)
             ]
@@ -210,6 +223,7 @@ def main() -> None:
     ap.add_argument("--entropy-anneal-to", type=float, default=-1.0)
     ap.add_argument("--init-from", type=str, default=None, help="从 checkpoint 继续训练")
     ap.add_argument("--opponent-mix", type=float, default=0.0, help="混入counting对手的对局比例")
+    ap.add_argument("--league", action="store_true", help="启用历史对手池")
     ap.add_argument("--smoke", action="store_true", help="快速冒烟（少量对局）")
     args = ap.parse_args()
 
@@ -225,6 +239,7 @@ def main() -> None:
         ppo=PPOConfig(learning_rate=args.lr, entropy_coef=args.entropy_coef),
         init_from=args.init_from,
         opponent_mix_prob=args.opponent_mix,
+        league=args.league,
     )
     if args.smoke:
         cfg.total_games = 4096

@@ -108,12 +108,14 @@ def collect_rollout(
     gae_lambda: float = 0.95,
     hidden_sizes: tuple[int, ...] = (256, 256, 128),
     opponent_mix_prob: float = 0.0,
+    opponent_state: dict | None = None,
 ) -> RolloutBatch:
     """跑满 n_games 局自博弈，返回训练 batch。可在子进程中调用。
 
-    opponent_mix_prob > 0 时，每局以该概率抽 1~(n-1) 个座位交给 counting
-    启发式执棋（锚点对手），只记录 NN 座位的轨迹——防自博弈漂移、
-    直接优化对抗启发式的能力。
+    opponent_mix_prob > 0 时，每局以该概率抽 1~(n-1) 个座位交给"对手"执棋，
+    只记录 NN 座位的轨迹——防自博弈漂移、直接优化对抗能力：
+    - opponent_state 为 None：对手 = counting 启发式（锚点）；
+    - 否则：对手 = 加载该 state_dict 的历史策略（League 对手池）。
     """
     torch.set_num_threads(1)
 
@@ -125,7 +127,30 @@ def collect_rollout(
 
     rng = random.Random(seed)
     n = config.num_players
-    heuristic = CountingAgent()
+
+    if opponent_state is None:
+        heuristic = CountingAgent()
+        opponent_act = heuristic.act
+    else:
+        opp_model = DominoNet(
+            obs_size(config), config.num_actions, hidden_sizes
+        )
+        opp_model.load_state_dict(opponent_state)
+        opp_model.eval()
+        _opp_obs = np.zeros(obs_size(config), dtype=np.float32)
+        _opp_mask = np.zeros(config.num_actions, dtype=np.float32)
+
+        def opponent_act(eng: DominoEngine) -> int:
+            legal = eng.legal_actions()
+            if legal & (legal - 1) == 0:  # 只有一个合法动作
+                return legal.bit_length() - 1
+            encode_obs(eng, out=_opp_obs)
+            legal_mask(eng, out=_opp_mask)
+            a, _, _ = opp_model.act(
+                torch.from_numpy(_opp_obs).unsqueeze(0),
+                torch.from_numpy(_opp_mask).unsqueeze(0),
+            )
+            return int(a.item())
 
     def sample_nn_seats() -> list[bool]:
         """每局决定哪些座位由 NN 控制。"""
@@ -146,7 +171,7 @@ def collect_rollout(
         """把引擎 k 推进到下一个 NN 决策点（或终局）。"""
         eng = engines[k]
         while not eng.is_over and not nn_seats[k][eng.current_player]:
-            eng.step(heuristic.act(eng))
+            eng.step(opponent_act(eng))
 
     for k, eng in enumerate(engines):
         eng.reset(seed=rng.randrange(1 << 30))
