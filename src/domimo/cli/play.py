@@ -1,121 +1,162 @@
-"""人机对战 CLI：你执一家，其余三家由指定 agent 执棋。
+"""人机对战 CLI：你执一家，其余座位由指定 agent 执棋。
 
 用法：
-    python3 -m domimo.cli.play                          # 对手默认 counting
-    python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt
-    python3 -m domimo.cli.play --seat 2 --seed 42
+    python3 -m domimo.cli.play                                    # 默认 counting + TUI
+    python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt  # 对战最强模型
+    python3 -m domimo.cli.play --opponents counting               # 对战记牌启发式
+    python3 -m domimo.cli.play --opponents counting,w_stuck_next=90 --ui plain
+    python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt,greedy=0 \\
+        --seat 2 --seed 42 --delay 0.5 --auto-pass
+    python3 -m domimo.cli.play --opponents counting greedy nn:models/ppo_best.pt
 """
 
 from __future__ import annotations
 
 import argparse
 import random
+import sys
 
 from ..config import GameConfig
 from ..engine import DominoEngine
-from ..tiles import format_tile, iter_tiles, pip_sum
-from .evaluate import make_agent
+from .agent_spec import make_agent, resolve_opponent_specs
+from .play_tui import PlayTUI, run_plain_ui
 
 
-def render_board(eng: DominoEngine, human_seat: int) -> str:
-    lines = []
-    if eng.left_end < 0:
-        lines.append("桌面: (空)")
-    else:
-        played = " ".join(
-            format_tile(a // 2, eng.pips) for _, a in eng.history if a != eng.config.pass_action
-        )
-        lines.append(f"桌面两端: 左[{eng.left_end}] ... 右[{eng.right_end}]")
-        lines.append(f"已出牌序: {played}")
-    sizes = eng.hand_sizes()
-    tags = []
-    for p in range(eng.config.num_players):
-        who = "你" if p == human_seat else f"AI{p}"
-        cur = "←当前" if (p == eng.current_player and not eng.is_over) else ""
-        tags.append(f"{who}:{sizes[p]}张{cur}")
-    lines.append(" | ".join(tags))
-    return "\n".join(lines)
+def _build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        description="Domino 人机对战（支持 counting / nn 等对手 + 简易 TUI）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+对手规格（--opponents）：
+  random / greedy / counting
+  counting,w_pip=1.8,w_double=38,w_stuck_next=72,w_stuck_others=6.5,w_flex=36,w_diversity=3.5,w_urgency=0.9
+  nn:<checkpoint路径>
+  nn:<checkpoint路径>,greedy=0          # 按策略分布采样而非贪心
+
+传 1 个规格时，其余三家全部使用该对手；传 3 个规格时按座位从小到大填入非人类座位。
+
+界面（--ui）：
+  tui    curses 全屏（默认；非 tty 时自动回退 plain）
+  plain  行模式增强 UI（编号选招、ANSI 配色）
+""",
+    )
+    ap.add_argument(
+        "--opponents",
+        nargs="+",
+        default=["counting"],
+        metavar="SPEC",
+        help="对手规格：1 个=全体相同；3 个=逐座位。默认 counting",
+    )
+    ap.add_argument("--seat", type=int, default=0, help="你的座位 0-3（默认 0）")
+    ap.add_argument("--seed", type=int, default=None, help="随机种子（可复现整场）")
+    ap.add_argument("--games", type=int, default=0, help="打几局（0=无限，每局后询问）")
+    ap.add_argument(
+        "--ui",
+        choices=("tui", "plain"),
+        default="tui",
+        help="界面模式：tui=curses 全屏，plain=行模式（默认 tui）",
+    )
+    ap.add_argument(
+        "--delay",
+        type=float,
+        default=0.35,
+        help="AI 出牌后停顿秒数，便于观看（默认 0.35；plain 默认仍可用 0）",
+    )
+    ap.add_argument(
+        "--auto-pass",
+        action="store_true",
+        help="无牌可出时自动 PASS，无需确认",
+    )
+    ap.add_argument(
+        "--name",
+        type=str,
+        default="你",
+        help="你的显示名（默认「你」）",
+    )
+    ap.add_argument(
+        "--no-color",
+        action="store_true",
+        help="plain 模式下关闭 ANSI 颜色",
+    )
+    return ap
 
 
-def human_turn(eng: DominoEngine) -> int:
-    legal = eng.legal_actions_list()
-    hand = list(iter_tiles(eng.hands[eng.current_player]))
-    print(f"你的手牌: {'  '.join(f'{i}:{format_tile(t, eng.pips)}' for i, t in enumerate(hand))}")
-    if legal == [eng.config.pass_action]:
-        input("无牌可出，回车 PASS...")
-        return eng.config.pass_action
-
-    options = []
-    for a in legal:
-        tid, side = divmod(a, 2)
-        side_txt = "左" if side == 0 else "右"
-        if eng.left_end < 0:
-            side_txt = "首"
-        options.append((a, f"{format_tile(tid, eng.pips)}→{side_txt}"))
-    print("可选: " + "  ".join(f"[{i}]{txt}" for i, (_, txt) in enumerate(options)))
-    while True:
-        raw = input("选择编号> ").strip()
-        try:
-            idx = int(raw)
-            if 0 <= idx < len(options):
-                return options[idx][0]
-        except ValueError:
-            pass
-        print("输入无效，重试")
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Domino 人机对战")
-    ap.add_argument("--opponents", type=str, default="counting",
-                    help="对手类型: random/greedy/counting/nn:<ckpt>")
-    ap.add_argument("--seat", type=int, default=0, help="你的座位 0-3")
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--games", type=int, default=0, help="打几局（0=无限）")
-    args = ap.parse_args()
-
+def main(argv: list[str] | None = None) -> None:
+    args = _build_parser().parse_args(argv)
     cfg = GameConfig()
+
+    if not (0 <= args.seat < cfg.num_players):
+        raise SystemExit(f"--seat 须在 0..{cfg.num_players - 1}")
+
+    try:
+        seat_specs = resolve_opponent_specs(args.opponents, args.seat, cfg.num_players)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
+
+    try:
+        agents = {
+            seat: make_agent(spec, seed=(args.seed or 0) + 17 + seat, config=cfg)
+            for seat, spec in seat_specs.items()
+        }
+    except (ValueError, FileNotFoundError, OSError) as e:
+        raise SystemExit(f"创建对手失败: {e}") from e
+
+    # 展示用标签：去重保序
+    seen: list[str] = []
+    for spec in seat_specs.values():
+        if spec not in seen:
+            seen.append(spec)
+    opponent_tag = " + ".join(seen)
+
     eng = DominoEngine(cfg)
-    ai = {
-        p: make_agent(args.opponents, seed=p)
-        for p in range(cfg.num_players)
-        if p != args.seat
-    }
     rng = random.Random(args.seed)
-    totals = [0.0] * cfg.num_players
-    game_no = 0
 
-    while True:
-        game_no += 1
-        print(f"\n===== 第 {game_no} 局 =====")
-        eng.reset(seed=rng.randrange(1 << 30))
-        while not eng.is_over:
-            print("\n" + render_board(eng, args.seat))
-            p = eng.current_player
-            if p == args.seat:
-                action = human_turn(eng)
-            else:
-                action = ai[p].act(eng)
-                if action == cfg.pass_action:
-                    print(f"AI{p}: PASS")
-                else:
-                    tid, side = divmod(action, 2)
-                    print(f"AI{p}: 出 {format_tile(tid, eng.pips)}（{'左' if side == 0 else '右'}）")
-            eng.step(action)
+    ui = args.ui
+    if ui == "tui" and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        print("[提示] 非交互终端，回退到 --ui plain", file=sys.stderr)
+        ui = "plain"
 
-        scores = eng.scores()
-        tag = "堵死" if eng.blocked else "出完"
-        winner = "你" if eng.winner == args.seat else (f"AI{eng.winner}" if eng.winner >= 0 else "平局")
-        print(f"\n### 终局（{tag}）赢家: {winner}")
-        for p in range(cfg.num_players):
-            left = pip_sum(eng.hands[p], eng.pips)
-            who = "你" if p == args.seat else f"AI{p}"
-            totals[p] += scores[p]
-            print(f"  {who}: 剩 {left} 点，本局 {scores[p]:+.0f}，累计 {totals[p]:+.0f}")
+    if ui == "tui":
+        try:
+            import curses
+        except ImportError as e:  # pragma: no cover
+            print(f"[提示] curses 不可用（{e}），回退到 --ui plain", file=sys.stderr)
+            ui = "plain"
+        else:
+            try:
+                PlayTUI(
+                    eng=eng,
+                    agents=agents,
+                    human_seat=args.seat,
+                    opponent_tag=opponent_tag,
+                    games=args.games,
+                    seed_rng=rng,
+                    delay=args.delay,
+                    auto_pass=args.auto_pass,
+                    human_name=args.name,
+                ).run()
+                return
+            except curses.error as e:  # pragma: no cover - 终端环境相关
+                print(f"[提示] curses 启动失败（{e}），回退到 --ui plain", file=sys.stderr)
+                ui = "plain"
 
-        if args.games and game_no >= args.games:
-            break
-        if input("\n再来一局？(y/n)> ").strip().lower() not in ("", "y", "yes"):
-            break
+    # plain 默认更短延迟，除非用户显式传了 --delay
+    delay = args.delay
+    argv_list = argv if argv is not None else sys.argv[1:]
+    if "--delay" not in argv_list:
+        delay = 0.0
+    run_plain_ui(
+        eng=eng,
+        agents=agents,
+        human_seat=args.seat,
+        opponent_tag=opponent_tag,
+        games=args.games,
+        seed_rng=rng,
+        delay=delay,
+        auto_pass=args.auto_pass,
+        human_name=args.name,
+        color=not args.no_color,
+    )
 
 
 if __name__ == "__main__":

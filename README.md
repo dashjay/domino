@@ -19,9 +19,27 @@ python3 -m pytest tests/ -q                     # 全量测试（66 个，含RL�
 ## 和 AI 对战
 
 ```bash
-python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt   # 对战最强模型
+python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt   # 对战最强模型（默认 curses TUI）
 python3 -m domimo.cli.play --opponents counting                # 对战记牌启发式
+python3 -m domimo.cli.play --opponents counting --ui plain     # 行模式（SSH/非全屏也可用）
 ```
+
+常用参数：
+
+```bash
+# 座位 / 种子 / AI 出牌停顿 / 无牌自动 PASS
+python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt \
+    --seat 0 --seed 42 --delay 0.4 --auto-pass
+
+# 对手附加参数：counting 权重、nn 是否贪心
+python3 -m domimo.cli.play --opponents counting,w_stuck_next=90,w_pip=2.0
+python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt,greedy=0
+
+# 三个对手各用不同策略（座位 1/2/3）
+python3 -m domimo.cli.play --opponents counting greedy nn:models/ppo_best.pt
+```
+
+TUI 键位：`↑↓`/`jk` 选招，`Enter` 确认，数字快捷键，`p` PASS，`a` 切换自动 PASS，`q` 退出。
 
 ## 评估棋力
 

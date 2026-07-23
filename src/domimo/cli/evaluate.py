@@ -3,8 +3,9 @@
 用法：
     python3 -m domimo.cli.evaluate --agents counting random random random -n 20000
     python3 -m domimo.cli.evaluate --agents counting greedy random random -n 20000 --workers 4
+    python3 -m domimo.cli.evaluate --agents nn:models/ppo_best.pt,greedy=1 counting counting counting -n 2000
 
-agent 名可选：random / greedy / counting / nn:<checkpoint路径>（阶段4后可用）
+agent 名可选：random / greedy / counting / nn:<checkpoint路径>（可附 ,key=value 参数）
 """
 
 from __future__ import annotations
@@ -12,34 +13,27 @@ from __future__ import annotations
 import argparse
 import time
 
-from ..agents import CountingAgent, GreedyAgent, RandomAgent
 from ..arena import run_match
 from ..config import GameConfig
-
-
-def make_agent(spec: str, seed: int):
-    if spec == "random":
-        return RandomAgent(seed=seed)
-    if spec == "greedy":
-        return GreedyAgent()
-    if spec == "counting":
-        return CountingAgent()
-    if spec.startswith("nn:"):
-        from ..agents.nn_agent import NNAgent
-
-        return NNAgent(spec[3:])
-    raise SystemExit(f"未知 agent: {spec}")
+from .agent_spec import make_agent
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Domino 竞技场评估")
-    ap.add_argument("--agents", nargs=4, required=True, help="4 个 agent 名")
+    ap.add_argument("--agents", nargs=4, required=True, help="4 个 agent 规格")
     ap.add_argument("-n", "--n-games", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=None)
     args = ap.parse_args()
 
-    agents = [make_agent(s, seed=args.seed + i) for i, s in enumerate(args.agents)]
+    try:
+        agents = [
+            make_agent(s, seed=args.seed + i, config=GameConfig())
+            for i, s in enumerate(args.agents)
+        ]
+    except (ValueError, FileNotFoundError, OSError) as e:
+        raise SystemExit(f"创建 agent 失败: {e}") from e
+
     workers = args.workers
     if any(s.startswith("nn:") for s in args.agents) and (workers or 4) > 1:
         # torch 模型经 fork 到子进程可能死锁（OpenMP after-fork），NN 评估强制单进程
