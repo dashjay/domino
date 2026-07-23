@@ -1,0 +1,276 @@
+"""自博弈采样：多进程 worker，每个 worker 内 K 个引擎锁步推进 + 批量前向。
+
+设计要点：
+- 回合制多智能体：每个引擎任意时刻只有一个"当前玩家"，因此 K 个引擎的
+  当前玩家 obs 可拼成一个 batch 做一次网络前向（比逐局逐步推理快一个量级）；
+- 四个座位共享同一策略（参数共享自博弈）；
+- 奖励只在局终发放：reward_p = scores[p] / reward_norm，中途为 0；
+- GAE 按"每个玩家自己的决策序列"计算（bootstrap 自该玩家下一个决策点的 V）。
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+
+from ..config import GameConfig
+from ..engine import DominoEngine
+from ..env import encode_obs, legal_mask, obs_size
+from .model import DominoNet
+
+
+@dataclass
+class RolloutBatch:
+    obs: np.ndarray      # [N, obs]
+    mask: np.ndarray     # [N, act]
+    action: np.ndarray   # [N]
+    logp: np.ndarray     # [N]
+    value: np.ndarray    # [N]
+    adv: np.ndarray      # [N]
+    ret: np.ndarray      # [N]
+    n_games: int
+    mean_score_p0: float  # 诊断用：座位0平均得分（自博弈应≈0）
+
+    @staticmethod
+    def concat(batches: list["RolloutBatch"]) -> "RolloutBatch":
+        return RolloutBatch(
+            obs=np.concatenate([b.obs for b in batches]),
+            mask=np.concatenate([b.mask for b in batches]),
+            action=np.concatenate([b.action for b in batches]),
+            logp=np.concatenate([b.logp for b in batches]),
+            value=np.concatenate([b.value for b in batches]),
+            adv=np.concatenate([b.adv for b in batches]),
+            ret=np.concatenate([b.ret for b in batches]),
+            n_games=sum(b.n_games for b in batches),
+            mean_score_p0=float(
+                np.mean([b.mean_score_p0 for b in batches])
+            ),
+        )
+
+
+class _PlayerTraj:
+    """单局中单个玩家的决策序列缓存。"""
+
+    __slots__ = ("obs", "mask", "action", "logp", "value")
+
+    def __init__(self):
+        self.obs: list[np.ndarray] = []
+        self.mask: list[np.ndarray] = []
+        self.action: list[int] = []
+        self.logp: list[float] = []
+        self.value: list[float] = []
+
+
+def _game_rewards(
+    scores: list[float], reward_norm: float, reward_mode: str, winner: int
+) -> list[float]:
+    """局终奖励向量。
+
+    - "pips"：归一化分差（默认，优化期望得分）；
+    - "rank"：胜 +1 / 负 -1/(n-1)（直接优化胜率）；
+    - "mixed"：rank 为主 + 小比例 pips 塑形（兼顾胜率与少输分）。
+    """
+    n = len(scores)
+    if reward_mode == "pips":
+        return [s / reward_norm for s in scores]
+    rank = [
+        (1.0 if p == winner else -1.0 / (n - 1)) if winner >= 0 else 0.0
+        for p in range(n)
+    ]
+    if reward_mode == "rank":
+        return rank
+    # mixed
+    return [r + s / (reward_norm * 4) for r, s in zip(rank, scores)]
+
+
+def _finalize_game(
+    trajs: list[_PlayerTraj],
+    rewards: list[float],
+    gamma: float,
+    gae_lambda: float,
+    out: dict[str, list],
+) -> None:
+    """对一局四个玩家的轨迹计算 GAE 并写入输出缓冲。"""
+    for p, tr in enumerate(trajs):
+        T = len(tr.action)
+        if T == 0:
+            continue
+        reward = rewards[p]  # 只有终局奖励
+        adv = np.zeros(T, dtype=np.float32)
+        last_gae = 0.0
+        for t in reversed(range(T)):
+            if t == T - 1:
+                delta = reward - tr.value[t]  # 终局无 bootstrap
+            else:
+                delta = gamma * tr.value[t + 1] - tr.value[t]
+            last_gae = delta + gamma * gae_lambda * last_gae
+            adv[t] = last_gae
+        ret = adv + np.asarray(tr.value, dtype=np.float32)
+        out["obs"].extend(tr.obs)
+        out["mask"].extend(tr.mask)
+        out["action"].extend(tr.action)
+        out["logp"].extend(tr.logp)
+        out["value"].extend(tr.value)
+        out["adv"].extend(adv.tolist())
+        out["ret"].extend(ret.tolist())
+
+
+def collect_rollout(
+    state_dict: dict,
+    config: GameConfig,
+    n_games: int,
+    seed: int,
+    n_parallel_envs: int = 16,
+    reward_norm: float = 30.0,
+    gamma: float = 1.0,
+    gae_lambda: float = 0.95,
+    hidden_sizes: tuple[int, ...] = (256, 256, 128),
+    opponent_mix_prob: float = 0.0,
+    opponent_state: dict | None = None,
+    reward_mode: str = "pips",
+) -> RolloutBatch:
+    """跑满 n_games 局自博弈，返回训练 batch。可在子进程中调用。
+
+    opponent_mix_prob > 0 时，每局以该概率抽 1~(n-1) 个座位交给"对手"执棋，
+    只记录 NN 座位的轨迹——防自博弈漂移、直接优化对抗能力：
+    - opponent_state 为 None：对手 = counting 启发式（锚点）；
+    - 否则：对手 = 加载该 state_dict 的历史策略（League 对手池）。
+    """
+    torch.set_num_threads(1)
+
+    from ..agents import CountingAgent
+
+    model = DominoNet(obs_size(config), config.num_actions, hidden_sizes)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    rng = random.Random(seed)
+    n = config.num_players
+
+    if opponent_state is None:
+        heuristic = CountingAgent()
+        opponent_act = heuristic.act
+    else:
+        opp_model = DominoNet(
+            obs_size(config), config.num_actions, hidden_sizes
+        )
+        opp_model.load_state_dict(opponent_state)
+        opp_model.eval()
+        _opp_obs = np.zeros(obs_size(config), dtype=np.float32)
+        _opp_mask = np.zeros(config.num_actions, dtype=np.float32)
+
+        def opponent_act(eng: DominoEngine) -> int:
+            legal = eng.legal_actions()
+            if legal & (legal - 1) == 0:  # 只有一个合法动作
+                return legal.bit_length() - 1
+            encode_obs(eng, out=_opp_obs)
+            legal_mask(eng, out=_opp_mask)
+            a, _, _ = opp_model.act(
+                torch.from_numpy(_opp_obs).unsqueeze(0),
+                torch.from_numpy(_opp_mask).unsqueeze(0),
+            )
+            return int(a.item())
+
+    def sample_nn_seats() -> list[bool]:
+        """每局决定哪些座位由 NN 控制。"""
+        if opponent_mix_prob > 0 and rng.random() < opponent_mix_prob:
+            n_opp = rng.randint(1, n - 1)
+            opp_seats = set(rng.sample(range(n), n_opp))
+            return [s not in opp_seats for s in range(n)]
+        return [True] * n
+
+    K = min(n_parallel_envs, n_games)
+    engines = [DominoEngine(config) for _ in range(K)]
+    nn_seats: list[list[bool]] = [sample_nn_seats() for _ in range(K)]
+    trajs: list[list[_PlayerTraj]] = [
+        [_PlayerTraj() for _ in range(config.num_players)] for _ in range(K)
+    ]
+
+    def advance_heuristics(k: int) -> None:
+        """把引擎 k 推进到下一个 NN 决策点（或终局）。"""
+        eng = engines[k]
+        while not eng.is_over and not nn_seats[k][eng.current_player]:
+            eng.step(opponent_act(eng))
+
+    for k, eng in enumerate(engines):
+        eng.reset(seed=rng.randrange(1 << 30))
+        advance_heuristics(k)
+
+    out: dict[str, list] = {
+        k: [] for k in ("obs", "mask", "action", "logp", "value", "adv", "ret")
+    }
+    games_done = 0
+    games_launched = K
+    score_p0_sum = 0.0
+    nobs = obs_size(config)
+    na = config.num_actions
+
+    obs_buf = np.zeros((K, nobs), dtype=np.float32)
+    mask_buf = np.zeros((K, na), dtype=np.float32)
+
+    active = list(range(K))
+    while active:
+        # 1) 编码所有活跃引擎当前玩家的 obs
+        for row, k in enumerate(active):
+            encode_obs(engines[k], out=obs_buf[row])
+            legal_mask(engines[k], out=mask_buf[row])
+        obs_t = torch.from_numpy(obs_buf[: len(active)])
+        mask_t = torch.from_numpy(mask_buf[: len(active)])
+
+        # 2) 批量前向 + 采样
+        action_t, logp_t, value_t = model.act(obs_t, mask_t)
+        actions = action_t.tolist()
+        logps = logp_t.tolist()
+        values = value_t.tolist()
+
+        # 3) 推进每个引擎
+        next_active = []
+        for row, k in enumerate(active):
+            eng = engines[k]
+            p = eng.current_player
+            tr = trajs[k][p]
+            tr.obs.append(obs_buf[row].copy())
+            tr.mask.append(mask_buf[row].copy())
+            tr.action.append(actions[row])
+            tr.logp.append(logps[row])
+            tr.value.append(values[row])
+            eng.step(actions[row])
+            advance_heuristics(k)
+
+            if eng.is_over:
+                scores = eng.scores()
+                score_p0_sum += scores[0]
+                rewards = _game_rewards(
+                    scores, reward_norm, reward_mode, eng.winner
+                )
+                _finalize_game(
+                    trajs[k], rewards, gamma, gae_lambda, out
+                )
+                games_done += 1
+                trajs[k] = [
+                    _PlayerTraj() for _ in range(config.num_players)
+                ]
+                if games_launched < n_games:
+                    eng.reset(seed=rng.randrange(1 << 30))
+                    nn_seats[k] = sample_nn_seats()
+                    advance_heuristics(k)
+                    games_launched += 1
+                    next_active.append(k)
+            else:
+                next_active.append(k)
+        active = next_active
+
+    return RolloutBatch(
+        obs=np.asarray(out["obs"], dtype=np.float32),
+        mask=np.asarray(out["mask"], dtype=np.float32),
+        action=np.asarray(out["action"], dtype=np.int64),
+        logp=np.asarray(out["logp"], dtype=np.float32),
+        value=np.asarray(out["value"], dtype=np.float32),
+        adv=np.asarray(out["adv"], dtype=np.float32),
+        ret=np.asarray(out["ret"], dtype=np.float32),
+        n_games=games_done,
+        mean_score_p0=score_p0_sum / max(games_done, 1),
+    )
