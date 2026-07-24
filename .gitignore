@@ -7,3 +7,4 @@ dist/
 checkpoints/
 runs/
 *.pt
+.venv/
