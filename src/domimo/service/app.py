@@ -9,7 +9,7 @@
       "opponent_hand_counts": [7, 7, 7],
       "missing": [[], [], []],
       "num_players": 4, "hand_size": 7, "max_pip": 6,
-      "simulations": 600, "rollout": "greedy", "seed": 0
+      "simulations": 400, "rollout": "counting", "seed": 0
     }
 
 字段说明：
@@ -229,7 +229,7 @@ def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConf
     n_sims = int(payload.get("simulations", payload.get("n_sims", 400)))
     if n_sims < 1:
         raise AnalyzeError("simulations 至少为 1")
-    rollout = str(payload.get("rollout", "greedy"))
+    rollout = str(payload.get("rollout", "counting"))
     if rollout not in ("random", "greedy", "counting"):
         raise AnalyzeError("rollout 只能是 random / greedy / counting")
     seed = payload.get("seed")
@@ -305,8 +305,8 @@ pre{padding:1rem;overflow:auto}code{padding:.1rem .3rem}
 <pre>curl -s localhost:8000/analyze -H 'Content-Type: application/json' -d '{
   "hand":  [[6,6],[3,4],[1,5],[0,4],[2,2],[0,1],[5,6]],
   "board": [[3,5]],
-  "simulations": 600,
-  "rollout": "greedy"
+  "simulations": 400,
+  "rollout": "counting"
 }'</pre>
 </html>"""
 

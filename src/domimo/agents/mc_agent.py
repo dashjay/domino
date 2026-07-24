@@ -22,8 +22,8 @@ class MCAgent(Agent):
 
     def __init__(
         self,
-        n_sims: int = 400,
-        rollout: str = "greedy",
+        n_sims: int = 200,
+        rollout: str = "counting",
         seed: int = 0,
     ):
         self.pimc = PIMCConfig(n_sims=n_sims, rollout=rollout, seed=seed)

@@ -7,7 +7,7 @@
 然后 POST JSON 到 /analyze，返回按胜率从高到低排序的出牌：
     curl -s localhost:8000/analyze -H 'Content-Type: application/json' -d '{
       "hand": [[6,6],[3,4],[1,5],[0,4],[2,2],[0,1],[5,6]],
-      "board": [[3,5]], "simulations": 600, "rollout": "greedy"}'
+      "board": [[3,5]], "simulations": 400, "rollout": "counting"}'
 """
 
 from __future__ import annotations

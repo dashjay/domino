@@ -47,7 +47,8 @@ class PIMCConfig:
     """PIMC 搜索超参。"""
 
     n_sims: int = 400          # 确定化抽样次数（越大越稳，越慢）
-    rollout: str = "greedy"    # 模拟阶段各家出牌策略：random / greedy / counting
+    rollout: str = "counting"  # 模拟阶段各家出牌策略：random / greedy / counting
+                               # counting 最强（准确建模对手），greedy 最快
     seed: int = 0
     max_deal_tries: int = 40   # 单次确定化在满足约束下的最大重试
 
