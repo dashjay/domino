@@ -5,6 +5,8 @@
     greedy
     counting
     counting,w_stuck_next=80,w_pip=2.0
+    mc
+    mc,n_sims=800,rollout=counting
     nn:models/ppo_best.pt
     nn:models/ppo_best.pt,greedy=0
 """
@@ -13,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..agents import CountingAgent, GreedyAgent, RandomAgent
+from ..agents import CountingAgent, GreedyAgent, MCAgent, RandomAgent
 from ..agents.base import Agent
 from ..config import GameConfig
 
@@ -74,6 +76,18 @@ def make_agent(
         if unknown:
             raise ValueError(f"counting 未知参数: {sorted(unknown)}")
         return CountingAgent(**opts)
+    if head == "mc":
+        known = {"n_sims", "rollout", "seed"}
+        unknown = set(opts) - known
+        if unknown:
+            raise ValueError(f"mc 未知参数: {sorted(unknown)}")
+        kwargs: dict[str, Any] = {}
+        if "n_sims" in opts:
+            kwargs["n_sims"] = int(opts["n_sims"])
+        if "rollout" in opts:
+            kwargs["rollout"] = str(opts["rollout"])
+        kwargs["seed"] = int(opts.get("seed", seed))
+        return MCAgent(**kwargs)
     if head.startswith("nn:"):
         from ..agents.nn_agent import NNAgent
 
