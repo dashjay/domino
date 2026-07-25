@@ -4,10 +4,10 @@ import random
 
 import numpy as np
 
-from domimo.config import GameConfig
-from domimo.engine import DominoEngine
-from domimo.env import DominoEnv, encode_obs, legal_mask, obs_size
-from domimo.tiles import iter_tiles, popcount, tile_id
+from domino.config import GameConfig
+from domino.engine import DominoEngine
+from domino.env import DominoEnv, encode_obs, legal_mask, obs_size
+from domino.tiles import iter_tiles, popcount, tile_id
 
 
 CFG = GameConfig()
@@ -99,7 +99,7 @@ def test_obs_playability_features():
     base = 125
     l, r = eng.left_end, eng.right_end
     for t in range(28):
-        from domimo.tiles import TILE_PIPS
+        from domino.tiles import TILE_PIPS
 
         a, b = TILE_PIPS[t]
         assert obs[base + t] == float(a == l or b == l)

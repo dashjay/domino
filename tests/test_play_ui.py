@@ -7,10 +7,10 @@ from contextlib import redirect_stdout
 
 import pytest
 
-from domimo.agents import CountingAgent, GreedyAgent, RandomAgent
-from domimo.cli.agent_spec import make_agent, parse_agent_spec, resolve_opponent_specs
-from domimo.cli.play_render import format_chain, legal_options, reconstruct_chain
-from domimo.engine import DominoEngine
+from domino.agents import CountingAgent, GreedyAgent, RandomAgent
+from domino.cli.agent_spec import make_agent, parse_agent_spec, resolve_opponent_specs
+from domino.cli.play_render import format_chain, legal_options, reconstruct_chain
+from domino.engine import DominoEngine
 
 
 def test_parse_counting_kwargs():
@@ -37,7 +37,7 @@ def test_make_basic_agents():
 
 def test_make_nn_agent_loads_checkpoint():
     pytest.importorskip("torch")
-    from domimo.agents.nn_agent import NNAgent
+    from domino.agents.nn_agent import NNAgent
 
     agent = make_agent("nn:models/ppo_best.pt,greedy=1", seed=0)
     assert isinstance(agent, NNAgent)
@@ -93,7 +93,7 @@ def test_legal_options_first_move_or_pass():
 
 def test_plain_ui_plays_one_game_with_scripted_input():
     """用脚本化输入跑完 plain UI 一局（对手 random，自动可走完）。"""
-    from domimo.cli import play as play_mod
+    from domino.cli import play as play_mod
 
     # 人类座位若首手被强制出双六，只需不断选 0；无法出则 PASS
     # 用足够多的 "0\n" 覆盖一手选择；终局后 n 退出
@@ -122,7 +122,7 @@ def test_plain_ui_plays_one_game_with_scripted_input():
 
 
 def test_play_help_mentions_ui_and_params():
-    from domimo.cli.play import _build_parser
+    from domino.cli.play import _build_parser
 
     help_txt = _build_parser().format_help()
     assert "--ui" in help_txt

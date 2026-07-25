@@ -1,9 +1,9 @@
 """竞技场评估入口。
 
 用法：
-    python3 -m domimo.cli.evaluate --agents counting random random random -n 20000
-    python3 -m domimo.cli.evaluate --agents counting greedy random random -n 20000 --workers 4
-    python3 -m domimo.cli.evaluate --agents nn:models/ppo_best.pt,greedy=1 counting counting counting -n 2000
+    python3 -m domino.cli.evaluate --agents counting random random random -n 20000
+    python3 -m domino.cli.evaluate --agents counting greedy random random -n 20000 --workers 4
+    python3 -m domino.cli.evaluate --agents nn:models/ppo_best.pt,greedy=1 counting counting counting -n 2000
 
 agent 名可选：random / greedy / counting / nn:<checkpoint路径>（可附 ,key=value 参数）
 """

@@ -4,14 +4,14 @@ import random
 
 import pytest
 
-from domimo.config import (
+from domino.config import (
     BlockedTieRule,
     FirstMoveRule,
     GameConfig,
     ScoringRule,
 )
-from domimo.engine import DominoEngine, IllegalActionError
-from domimo.tiles import is_double, iter_tiles, pip_sum, popcount, tile_id
+from domino.engine import DominoEngine, IllegalActionError
+from domino.tiles import is_double, iter_tiles, pip_sum, popcount, tile_id
 
 
 CFG = GameConfig()

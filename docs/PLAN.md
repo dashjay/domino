@@ -64,9 +64,9 @@ GameConfig → DominoEngine（纯 int/位图，无对象开销）
 目录结构（新建于 /workspace）：
 
 ```
-domimo/
+domino/
 ├── pyproject.toml               # 包配置，依赖：numpy, torch(cpu), pytest, tqdm, matplotlib
-├── src/domimo/
+├── src/domino/
 │   ├── __init__.py
 │   ├── tiles.py                 # 牌编码：tile_id/TILE_PIPS/位图工具/pip_count
 │   ├── config.py                # GameConfig dataclass（第 1 节全部规则开关）
@@ -166,8 +166,8 @@ domimo/
 - **验收**：新版本 vs 旧版本、vs counting 的 Elo 持续上升；最终模型 vs counting 胜率 ≥ 45%。
 
 ### 阶段 6：人机对战与分析（0.5 天）✅ 已完成
-> `python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt`（人机对战）；
-> `python3 -m domimo.cli.evaluate --agents nn:models/ppo_best.pt counting counting counting -n 20000`（评估报告，NN 自动单进程防 fork 死锁）。
+> `python3 -m domino.cli.play --opponents nn:models/ppo_best.pt`（人机对战）；
+> `python3 -m domino.cli.evaluate --agents nn:models/ppo_best.pt counting counting counting -n 20000`（评估报告，NN 自动单进程防 fork 死锁）。
 - `cli/play.py`：终端渲染（Unicode 牌面 `[6|6]`、两端、各家牌数），你执一家，其余三家用最强模型。
 - `cli/evaluate.py`：一条命令输出任意 agent 组合的完整评估报告。
 - **验收**：你能流畅完成整局人机对战；模型的出牌在直觉上"像会打的人"（会堵、会甩双、会算牌）。

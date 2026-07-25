@@ -199,7 +199,7 @@ class PlayTUI:
             y += 1
             return y
 
-        title = f" Domimo 人机对战  ·  对手 {self.opponent_tag}  ·  第 {self.game_no} 局 "
+        title = f" Domino 人机对战  ·  对手 {self.opponent_tag}  ·  第 {self.game_no} 局 "
         put(title[: w - 1], curses.color_pair(6) | curses.A_BOLD if curses.has_colors() else curses.A_REVERSE)
         put("")
 
