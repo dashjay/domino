@@ -7,12 +7,13 @@ import urllib.request
 
 import pytest
 
-from domimo.service.app import (
+from domino.service.app import (
     AnalyzeError,
     analyze,
     build_public_state,
     derive_ends,
 )
+from domino.service.decision_log import DecisionLog
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,39 @@ def test_analyze_bad_rollout():
 
 
 # ---------------------------------------------------------------------------
+# 决策 JSONL
+# ---------------------------------------------------------------------------
+
+def test_decision_log_writes_decision_and_feedback(tmp_path):
+    log = DecisionLog(tmp_path / "mc.jsonl")
+    req = {
+        "hand": [[6, 6], [3, 4], [1, 5], [0, 4], [2, 2], [0, 1], [5, 6]],
+        "board": [[3, 5]],
+        "simulations": 80,
+        "seed": 1,
+        "requestId": 42,
+    }
+    result = analyze(req)
+    log.log_decision(req, result, latency_ms=12.5)
+    log.log_feedback(
+        {"requestId": 42, "chosen": {"tile": [2, 2], "side_label": "left"}}
+    )
+    log.log_feedback({"requestId": 42, "won": True, "game_id": "g1"})
+    lines = (tmp_path / "mc.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3
+    d0 = json.loads(lines[0])
+    assert d0["type"] == "decision"
+    assert d0["request_id"] == 42
+    assert d0["win_rate"] == result["best"]["win_rate"]
+    assert d0["best"]["tile"] == result["best"]["tile"]
+    assert len(d0["ranking"]) == len(result["ranking"])
+    d1 = json.loads(lines[1])
+    assert d1["type"] == "feedback" and d1["chosen"]["tile"] == [2, 2]
+    d2 = json.loads(lines[2])
+    assert d2["won"] is True and d2["game_id"] == "g1"
+
+
+# ---------------------------------------------------------------------------
 # 端到端 HTTP
 # ---------------------------------------------------------------------------
 
@@ -123,13 +157,29 @@ def test_analyze_bad_rollout():
 def live_server():
     from http.server import ThreadingHTTPServer
 
-    from domimo.service.app import build_handler
+    from domino.service.app import build_handler
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), build_handler())
     port = httpd.server_address[1]
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     yield port
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.fixture()
+def live_server_with_log(tmp_path):
+    from http.server import ThreadingHTTPServer
+
+    from domino.service.app import build_handler
+
+    log_path = tmp_path / "decisions.jsonl"
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(DecisionLog(log_path)))
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    yield port, log_path
     httpd.shutdown()
     httpd.server_close()
 
@@ -179,3 +229,94 @@ def test_http_analyze_bad_request(live_server):
     assert exc.value.code == 400
     body = json.loads(exc.value.read())
     assert body["ok"] is False
+
+
+def test_http_decision_log_and_feedback(live_server_with_log):
+    port, log_path = live_server_with_log
+    status, body = _post(
+        port,
+        "/analyze",
+        {
+            "hand": [[6, 6], [3, 4], [1, 5], [0, 4], [2, 2], [0, 1], [5, 6]],
+            "board": [[3, 5]],
+            "simulations": 80,
+            "seed": 7,
+            "requestId": 99,
+        },
+    )
+    assert status == 200
+    status, fb = _post(
+        port,
+        "/feedback",
+        {
+            "requestId": 99,
+            "chosen": {"tile": body["best"]["tile"], "side_label": body["best"]["side_label"]},
+            "won": False,
+            "game_id": "t1",
+        },
+    )
+    assert status == 200 and fb["ok"] is True
+    lines = log_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    d = json.loads(lines[0])
+    assert d["type"] == "decision" and d["request_id"] == 99
+    assert d["ranking"][0]["tile"] == body["best"]["tile"]
+    f = json.loads(lines[1])
+    assert f["type"] == "feedback" and f["won"] is False
+
+
+# ---------------------------------------------------------------------------
+# objective / payout
+
+_BASE = {
+    "hand": [[6, 6], [3, 4], [1, 5], [0, 4], [2, 2], [0, 1], [5, 6]],
+    "board": [[3, 5]],
+    "simulations": 60,
+    "rollout": "greedy",
+    "seed": 3,
+}
+
+
+def test_analyze_defaults_to_ev_objective():
+    out = analyze(dict(_BASE))
+    assert out["config"]["objective"] == "ev"
+    assert out["config"]["payout"]["win_out"] == 6.0
+    evs = [r["ev"] for r in out["ranking"]]
+    assert evs == sorted(evs, reverse=True)
+
+
+def test_analyze_exposes_outcome_breakdown():
+    out = analyze(dict(_BASE))
+    for r in out["ranking"]:
+        o = r["outcomes"]
+        total = o["win_out"] + o["win_blocked"] + o["lose_out"] + o["lose_blocked"]
+        assert total + r["ties"] == r["plays"]
+        assert 0.0 <= r["blocked_rate"] <= 1.0
+
+
+def test_analyze_win_rate_objective_still_available():
+    out = analyze({**_BASE, "objective": "win_rate"})
+    assert out["config"]["objective"] == "win_rate"
+    rates = [r["win_rate"] for r in out["ranking"]]
+    assert rates == sorted(rates, reverse=True)
+
+
+def test_analyze_custom_payout():
+    out = analyze({**_BASE, "payout": {"win_out": 10, "lose_out": -1}})
+    assert out["config"]["payout"]["win_out"] == 10.0
+    assert out["config"]["payout"]["lose_out"] == -1.0
+    # 未指定的字段保留默认值
+    assert out["config"]["payout"]["win_blocked"] == 3.0
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ({"objective": "nope"}, "objective"),
+        ({"payout": [1, 2]}, "payout"),
+        ({"payout": {"bogus": 1}}, "payout"),
+    ],
+)
+def test_analyze_rejects_bad_objective_or_payout(bad, match):
+    with pytest.raises(AnalyzeError, match=match):
+        analyze({**_BASE, **bad})

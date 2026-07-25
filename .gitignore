@@ -8,3 +8,4 @@ checkpoints/
 runs/
 *.pt
 .venv/
+domino-mc.jsonl

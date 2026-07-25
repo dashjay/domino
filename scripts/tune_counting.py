@@ -9,8 +9,8 @@ from __future__ import annotations
 import random
 import sys
 
-from domimo.agents import CountingAgent, RandomAgent
-from domimo.arena import run_match
+from domino.agents import CountingAgent, RandomAgent
+from domino.arena import run_match
 
 
 def evaluate(weights: dict, n_games: int, seed: int = 0) -> float:

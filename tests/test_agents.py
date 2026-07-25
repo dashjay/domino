@@ -4,11 +4,11 @@ import random
 
 import pytest
 
-from domimo.agents import CountingAgent, GreedyAgent, RandomAgent
-from domimo.arena import run_match
-from domimo.config import GameConfig
-from domimo.engine import DominoEngine
-from domimo.tiles import tile_id
+from domino.agents import CountingAgent, GreedyAgent, RandomAgent
+from domino.arena import run_match
+from domino.config import GameConfig
+from domino.engine import DominoEngine
+from domino.tiles import tile_id
 
 
 CFG = GameConfig()

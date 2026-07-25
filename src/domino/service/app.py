@@ -22,20 +22,24 @@
   省略时把未见牌尽量均分给各对手。
 - ``missing``：按出牌顺序，每位对手「已确定没有」的点数列表（来自其 pass 推断）。
 - ``simulations`` / ``rollout`` / ``seed``：PIMC 抽样次数、模拟策略、随机种子。
+- ``objective``：``ev``（默认，按 ``payout`` 折算期望收益排序）或 ``win_rate``（纯胜率）。
+- ``payout``：自定义赔付表，默认取自 Higgs Domino 实测（堵死局赌注减半）。
 
-响应体按胜率从高到低排序，见 ``analyze`` 返回结构。
+响应体按 ``objective`` 从高到低排序，见 ``analyze`` 返回结构。
 """
 
 from __future__ import annotations
 
 import json
 import random
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from ..config import GameConfig
-from ..mc.pimc import PIMCConfig, PublicState, rank_actions
+from ..mc.pimc import PayoutModel, PIMCConfig, PublicState, rank_actions
 from ..tiles import num_tiles, tile_id
+from .decision_log import DecisionLog
 
 
 class AnalyzeError(ValueError):
@@ -116,6 +120,27 @@ def _even_split(total: int, parts: int) -> list[int]:
         return []
     base, rem = divmod(total, parts)
     return [base + (1 if i < rem else 0) for i in range(parts)]
+
+
+# 服务面向真实赔付的平台，默认按期望收益排序；传 objective="win_rate" 可退回纯胜率
+DEFAULT_OBJECTIVE = "ev"
+
+
+def _parse_payout(raw: Any) -> PayoutModel | None:
+    """解析自定义赔付表；None / 缺省时用 PayoutModel 的实测默认值。"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise AnalyzeError("payout 须为对象，如 {\"win_out\": 6, \"lose_out\": -2}")
+    known = {"win_out", "lose_out", "win_blocked", "lose_blocked", "tie"}
+    unknown = set(raw) - known
+    if unknown:
+        raise AnalyzeError(f"payout 未知字段: {sorted(unknown)}（可选 {sorted(known)}）")
+    base = PayoutModel()
+    try:
+        return PayoutModel(**{k: float(raw.get(k, getattr(base, k))) for k in known})
+    except (TypeError, ValueError) as e:
+        raise AnalyzeError(f"payout 数值不合法: {e}") from e
 
 
 def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConfig]:
@@ -234,7 +259,19 @@ def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConf
         raise AnalyzeError("rollout 只能是 random / greedy / counting")
     seed = payload.get("seed")
     seed = random.randrange(1 << 30) if seed is None else int(seed)
-    pimc = PIMCConfig(n_sims=n_sims, rollout=rollout, seed=seed)
+
+    objective = str(payload.get("objective", DEFAULT_OBJECTIVE))
+    if objective not in ("win_rate", "ev"):
+        raise AnalyzeError("objective 只能是 win_rate / ev")
+    payout = _parse_payout(payload.get("payout"))
+
+    pimc = PIMCConfig(
+        n_sims=n_sims,
+        rollout=rollout,
+        seed=seed,
+        objective=objective,
+        payout=payout,
+    )
     return state, cfg, pimc
 
 
@@ -243,11 +280,13 @@ def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConf
 # ---------------------------------------------------------------------------
 
 def analyze(payload: dict) -> dict:
-    """执行 PIMC 模拟，返回按胜率从高到低排序的出牌建议。"""
+    """执行 PIMC 模拟，返回按 objective（默认期望收益）从高到低排序的出牌建议。"""
     state, cfg, pimc = build_public_state(payload)
     ranking = rank_actions(state, cfg, pimc, random.Random(pimc.seed))
+    payout = pimc.payout or PayoutModel()
 
     def encode(st) -> dict:
+        w_out, w_blk, l_out, l_blk = st.outcome_counts()
         return {
             "tile": None if st.is_pass else list(st.tile),
             "side": st.side,
@@ -259,6 +298,15 @@ def analyze(payload: dict) -> dict:
             "win_rate": round(st.win_rate, 4),
             "tie_rate": round(st.tie_rate, 4),
             "mean_score": round(st.mean_score, 3),
+            # 按真实赔付折算的每局期望收益（底注为单位），objective="ev" 时的排序主键
+            "ev": round(st.ev(payout), 4),
+            "blocked_rate": round(st.blocked_rate, 4),
+            "outcomes": {
+                "win_out": w_out,
+                "win_blocked": w_blk,
+                "lose_out": l_out,
+                "lose_blocked": l_blk,
+            },
             "wins": st.wins,
             "ties": st.ties,
             "plays": st.plays,
@@ -274,6 +322,8 @@ def analyze(payload: dict) -> dict:
             "simulations": pimc.n_sims,
             "rollout": pimc.rollout,
             "seed": pimc.seed,
+            "objective": pimc.objective,
+            "payout": vars(payout),
         },
         "board": {
             "left": state.left_end,
@@ -301,7 +351,7 @@ pre{padding:1rem;overflow:auto}code{padding:.1rem .3rem}
 </style>
 <h1>Domino 蒙特卡洛出牌建议</h1>
 <p class=hint>POST JSON 到 <code>/analyze</code>，返回按胜率从高到低排序的出牌。
-健康检查 <code>GET /health</code>。</p>
+健康检查 <code>GET /health</code>；决策回传 <code>POST /feedback</code>。</p>
 <pre>curl -s localhost:8000/analyze -H 'Content-Type: application/json' -d '{
   "hand":  [[6,6],[3,4],[1,5],[0,4],[2,2],[0,1],[5,6]],
   "board": [[3,5]],
@@ -311,9 +361,12 @@ pre{padding:1rem;overflow:auto}code{padding:.1rem .3rem}
 </html>"""
 
 
-def build_handler():
+def build_handler(decision_log: DecisionLog | None = None):
+    log = decision_log
+
     class AnalyzeHandler(BaseHTTPRequestHandler):
-        server_version = "domimo-mc/0.1"
+        server_version = "domino-mc/0.1"
+        decision_log = log
 
         def _send_json(self, code: int, obj: dict) -> None:
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -323,7 +376,41 @@ def build_handler():
             self.end_headers()
             self.wfile.write(body)
 
+        def _read_json(self) -> tuple[Any | None, str | None, bytes]:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b""
+            try:
+                return (json.loads(raw.decode("utf-8")) if raw else {}), None, raw
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                return None, f"JSON 解析失败: {e}", raw
+
+        def _access_log(
+            self,
+            method: str,
+            path: str,
+            status: int,
+            started: float,
+            *,
+            input_: Any = None,
+            error: str | None = None,
+        ) -> None:
+            ms = (time.perf_counter() - started) * 1000.0
+            client = self.client_address[0] if self.client_address else "-"
+            parts = [
+                f"[domino-mc] {client} {method} {path} {status} {ms:.1f}ms",
+            ]
+            if input_ is not None:
+                try:
+                    payload = json.dumps(input_, ensure_ascii=False, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    payload = repr(input_)
+                parts.append(f"input={payload}")
+            if error is not None:
+                parts.append(f"error={error!r}")
+            print(" ".join(parts), flush=True)
+
         def do_GET(self) -> None:  # noqa: N802
+            started = time.perf_counter()
             path = self.path.split("?", 1)[0]
             if path in ("/", "/index.html"):
                 body = _INDEX_HTML.encode("utf-8")
@@ -332,46 +419,97 @@ def build_handler():
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                self._access_log("GET", path, 200, started)
             elif path == "/health":
                 self._send_json(200, {"ok": True, "status": "healthy"})
+                self._access_log("GET", path, 200, started)
             else:
                 self._send_json(404, {"ok": False, "error": "not found"})
+                self._access_log("GET", path, 404, started)
 
         def do_POST(self) -> None:  # noqa: N802
+            started = time.perf_counter()
             path = self.path.split("?", 1)[0]
+            if path == "/feedback":
+                self._handle_feedback(started)
+                return
             if path != "/analyze":
                 self._send_json(404, {"ok": False, "error": "not found"})
+                self._access_log("POST", path, 404, started)
                 return
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            raw = self.rfile.read(length) if length else b""
-            try:
-                payload = json.loads(raw.decode("utf-8")) if raw else {}
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                self._send_json(400, {"ok": False, "error": f"JSON 解析失败: {e}"})
+            payload, err, raw = self._read_json()
+            if err is not None:
+                self._send_json(400, {"ok": False, "error": err})
+                self._access_log(
+                    "POST", path, 400, started, input_=raw.decode("utf-8", "replace"), error=err
+                )
                 return
+            assert isinstance(payload, dict)
             try:
                 result = analyze(payload)
             except AnalyzeError as e:
                 self._send_json(400, {"ok": False, "error": str(e)})
+                self._access_log("POST", path, 400, started, input_=payload, error=str(e))
                 return
             except Exception as e:  # noqa: BLE001
-                self._send_json(500, {"ok": False, "error": f"内部错误: {e}"})
+                err = f"内部错误: {e}"
+                self._send_json(500, {"ok": False, "error": err})
+                self._access_log("POST", path, 500, started, input_=payload, error=err)
                 return
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            if self.decision_log is not None:
+                self.decision_log.log_decision(payload, result, latency_ms=latency_ms)
             self._send_json(200, result)
+            self._access_log("POST", path, 200, started, input_=payload)
 
-        def log_message(self, fmt: str, *args) -> None:  # 静默默认访问日志
+        def _handle_feedback(self, started: float) -> None:
+            path = "/feedback"
+            if self.decision_log is None:
+                self._send_json(
+                    503, {"ok": False, "error": "未启用决策日志（启动时加 --log）"}
+                )
+                self._access_log("POST", path, 503, started, error="log disabled")
+                return
+            payload, err, raw = self._read_json()
+            if err is not None:
+                self._send_json(400, {"ok": False, "error": err})
+                self._access_log(
+                    "POST", path, 400, started, input_=raw.decode("utf-8", "replace"), error=err
+                )
+                return
+            assert isinstance(payload, dict)
+            try:
+                record = self.decision_log.log_feedback(payload)
+            except ValueError as e:
+                self._send_json(400, {"ok": False, "error": str(e)})
+                self._access_log("POST", path, 400, started, input_=payload, error=str(e))
+                return
+            self._send_json(200, {"ok": True, "recorded": record})
+            self._access_log("POST", path, 200, started, input_=payload)
+
+        def log_message(self, fmt: str, *args) -> None:  # 静默默认访问日志（用 _access_log）
             pass
 
     return AnalyzeHandler
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8000) -> None:
-    handler = build_handler()
+def run_server(
+    host: str = "0.0.0.0",
+    port: int = 8000,
+    log_path: str | None = "domino-mc.jsonl",
+) -> None:
+    decision_log = DecisionLog(log_path) if log_path else None
+    handler = build_handler(decision_log)
     httpd = ThreadingHTTPServer((host, port), handler)
-    print(f"[domimo-mc] 监听 http://{host}:{port}  (POST /analyze, GET /health)")
+    endpoints = "POST /analyze, GET /health"
+    if decision_log is not None:
+        endpoints += ", POST /feedback"
+    print(f"[domino-mc] 监听 http://{host}:{port}  ({endpoints})")
+    if decision_log is not None:
+        print(f"[domino-mc] 决策日志 → {decision_log.path.resolve()}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[domimo-mc] 已停止")
+        print("\n[domino-mc] 已停止")
     finally:
         httpd.server_close()

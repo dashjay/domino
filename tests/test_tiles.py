@@ -1,6 +1,6 @@
 """tiles.py 编码与位图工具单测。"""
 
-from domimo.tiles import (
+from domino.tiles import (
     add_tile,
     build_pips_table,
     format_tile,

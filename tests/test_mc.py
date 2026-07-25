@@ -4,10 +4,10 @@ import random
 
 import pytest
 
-from domimo.agents import MCAgent
-from domimo.config import GameConfig
-from domimo.engine import DominoEngine
-from domimo.mc.pimc import (
+from domino.agents import MCAgent
+from domino.config import GameConfig
+from domino.engine import DominoEngine
+from domino.mc.pimc import (
     PIMCConfig,
     PublicState,
     legal_actions_for,
@@ -15,7 +15,7 @@ from domimo.mc.pimc import (
     rank_actions,
     sample_deal,
 )
-from domimo.tiles import build_pips_table, tile_id
+from domino.tiles import build_pips_table, tile_id
 
 CFG = GameConfig()
 
@@ -216,3 +216,83 @@ def _bits(mask):
         out.append(low.bit_length() - 1)
         mask ^= low
     return out
+
+
+# ---------------------------------------------------------------------------
+# EV 目标（按真实赔付排序）
+# ---------------------------------------------------------------------------
+
+def test_outcome_counts_partition_plays():
+    """走空赢/堵死赢/走空输/堵死输 + 平局 应恰好覆盖全部模拟。"""
+    state = _mid_state(
+        [tile_id(3, 4), tile_id(5, 6), tile_id(1, 5), tile_id(0, 1),
+         tile_id(2, 2), tile_id(6, 6), tile_id(0, 4)],
+        left=3, right=5, played_tiles=[tile_id(3, 5)],
+    )
+    rk = rank_actions(state, CFG, PIMCConfig(n_sims=120, rollout="greedy", seed=3))
+    for s in rk:
+        assert sum(s.outcome_counts()) + s.ties == s.plays
+        assert all(c >= 0 for c in s.outcome_counts())
+        assert 0.0 <= s.blocked_rate <= 1.0
+
+
+def test_ev_matches_payout_definition():
+    from domino.mc.pimc import PayoutModel
+
+    state = _mid_state(
+        [tile_id(3, 4), tile_id(5, 6), tile_id(1, 5)],
+        left=3, right=5, played_tiles=[tile_id(3, 5)],
+        hand_sizes=[3, 7, 7, 7],
+    )
+    payout = PayoutModel()
+    rk = rank_actions(state, CFG, PIMCConfig(n_sims=100, rollout="greedy", seed=5))
+    for s in rk:
+        w_out, w_blk, l_out, l_blk = s.outcome_counts()
+        expect = (
+            w_out * payout.win_out + w_blk * payout.win_blocked
+            + l_out * payout.lose_out + l_blk * payout.lose_blocked
+        ) / s.plays
+        assert s.ev(payout) == pytest.approx(expect)
+
+
+def test_ev_objective_sorts_by_ev():
+    from domino.mc.pimc import PayoutModel
+
+    state = _mid_state(
+        [tile_id(3, 4), tile_id(5, 6), tile_id(1, 5), tile_id(0, 1),
+         tile_id(2, 2), tile_id(6, 6), tile_id(0, 4)],
+        left=3, right=5, played_tiles=[tile_id(3, 5)],
+    )
+    cfg = PIMCConfig(n_sims=200, rollout="greedy", seed=7, objective="ev")
+    rk = rank_actions(state, CFG, cfg)
+    evs = [s.ev(PayoutModel()) for s in rk]
+    assert evs == sorted(evs, reverse=True)
+
+
+def test_ev_payout_all_wins_equal_reduces_to_win_rate():
+    """把走空/堵死赔付调成一样时，EV 排序必须退化为纯胜率排序。"""
+    from domino.mc.pimc import PayoutModel
+
+    flat = PayoutModel(win_out=1.0, win_blocked=1.0, lose_out=0.0, lose_blocked=0.0)
+    state = _mid_state(
+        [tile_id(3, 4), tile_id(5, 6), tile_id(1, 5), tile_id(0, 1),
+         tile_id(2, 2), tile_id(6, 6), tile_id(0, 4)],
+        left=3, right=5, played_tiles=[tile_id(3, 5)],
+    )
+    rk = rank_actions(
+        state, CFG,
+        PIMCConfig(n_sims=200, rollout="greedy", seed=11, objective="ev", payout=flat),
+    )
+    for s in rk:
+        assert s.ev(flat) == pytest.approx(s.win_rate)
+    assert [s.win_rate for s in rk] == sorted([s.win_rate for s in rk], reverse=True)
+
+
+def test_unknown_objective_rejected():
+    state = _mid_state(
+        [tile_id(3, 4), tile_id(5, 6)],
+        left=3, right=5, played_tiles=[tile_id(3, 5)],
+        hand_sizes=[2, 7, 7, 7],
+    )
+    with pytest.raises(ValueError, match="objective"):
+        rank_actions(state, CFG, PIMCConfig(n_sims=10, objective="nope"))

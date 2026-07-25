@@ -10,10 +10,10 @@ import random
 import numpy as np
 import pytest
 
-from domimo.agents import RandomAgent
-from domimo.arena import run_match
-from domimo.engine import DominoEngine
-from domimo.mini.tabular_q import MINI_CONFIG, TabularQTrainer, state_key
+from domino.agents import RandomAgent
+from domino.arena import run_match
+from domino.engine import DominoEngine
+from domino.mini.tabular_q import MINI_CONFIG, TabularQTrainer, state_key
 
 
 def test_state_key_no_hidden_info():
@@ -64,7 +64,7 @@ def test_q_learning_beats_random():
 @pytest.mark.slow
 def test_q_learning_beats_counting_heuristic():
     """更强证据：学出的策略直接击败 counting 启发式（>50%）。"""
-    from domimo.agents import CountingAgent
+    from domino.agents import CountingAgent
 
     trainer = TabularQTrainer(seed=0)
     trainer.train(500_000)
@@ -86,10 +86,10 @@ def test_rollout_batch_shapes_and_gae():
     """采样 batch 形状一致、mask 与动作合法、GAE 数值有限。"""
     import torch
 
-    from domimo.config import GameConfig
-    from domimo.env import obs_size
-    from domimo.rl.model import DominoNet
-    from domimo.rl.rollout import collect_rollout
+    from domino.config import GameConfig
+    from domino.env import obs_size
+    from domino.rl.model import DominoNet
+    from domino.rl.rollout import collect_rollout
 
     torch.manual_seed(0)
     cfg = GameConfig()
@@ -116,11 +116,11 @@ def test_ppo_smoke_learns_above_random():
     import shutil
     import tempfile
 
-    from domimo.rl.ppo import PPOConfig
-    from domimo.rl.train import TrainConfig, train, evaluate
-    from domimo.rl.model import DominoNet
-    from domimo.config import GameConfig
-    from domimo.env import obs_size
+    from domino.rl.ppo import PPOConfig
+    from domino.rl.train import TrainConfig, train, evaluate
+    from domino.rl.model import DominoNet
+    from domino.config import GameConfig
+    from domino.env import obs_size
 
     import torch
 

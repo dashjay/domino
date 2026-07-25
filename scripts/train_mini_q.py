@@ -9,9 +9,9 @@ from __future__ import annotations
 import sys
 import time
 
-from domimo.agents import RandomAgent
-from domimo.arena import run_match
-from domimo.mini.tabular_q import MINI_CONFIG, TabularQTrainer
+from domino.agents import RandomAgent
+from domino.arena import run_match
+from domino.mini.tabular_q import MINI_CONFIG, TabularQTrainer
 
 
 def main() -> None:

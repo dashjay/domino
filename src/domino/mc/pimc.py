@@ -43,6 +43,26 @@ class PublicState:
 
 
 @dataclass
+class PayoutModel:
+    """真实平台的赔付表，以底注为单位。
+
+    默认值实测自 Higgs Domino 的结算包：**堵死局赌注减半**——
+    堵死时赢家 +3、每个输家 -1；有人把牌走空则翻倍，赢家 +6、每个输家 -2。
+
+    这带来一个纯胜率排序看不到的结论：设赢面为 p，"让本局堵死"的边际价值是
+    ``(k-1) * (1 - 4p)``（k 为走空局相对堵死局的倍数）。也就是说 p < 25% 时
+    应当主动把牌局往堵死方向带（把损失砍半），p > 25% 时才该抢着走空。
+    注意零点固定在 25%，与倍数 k 无关，所以 k 估得不准也不会改变决策方向。
+    """
+
+    win_out: float = 6.0
+    lose_out: float = -2.0
+    win_blocked: float = 3.0
+    lose_blocked: float = -1.0
+    tie: float = 0.0
+
+
+@dataclass
 class PIMCConfig:
     """PIMC 搜索超参。"""
 
@@ -51,6 +71,8 @@ class PIMCConfig:
                                # counting 最强（准确建模对手），greedy 最快
     seed: int = 0
     max_deal_tries: int = 40   # 单次确定化在满足约束下的最大重试
+    objective: str = "win_rate"  # 排序目标：win_rate（纯胜率）或 ev（按赔付表算期望收益）
+    payout: PayoutModel | None = None  # objective="ev" 时生效，None 用默认赔付表
 
 
 @dataclass
@@ -65,6 +87,8 @@ class ActionStat:
     wins: float = 0.0
     ties: float = 0.0
     score_sum: float = 0.0
+    blocked_plays: float = 0.0  # 模拟终局为「堵死」的次数
+    wins_blocked: float = 0.0   # 其中我方获胜的次数
     _score_sq: float = field(default=0.0, repr=False)
 
     @property
@@ -78,6 +102,41 @@ class ActionStat:
     @property
     def mean_score(self) -> float:
         return self.score_sum / self.plays if self.plays else 0.0
+
+    @property
+    def blocked_rate(self) -> float:
+        return self.blocked_plays / self.plays if self.plays else 0.0
+
+    @property
+    def score_std(self) -> float:
+        """终局得分的样本标准差（用于给 mean_score 加置信区间）。"""
+        if self.plays < 2:
+            return 0.0
+        var = self._score_sq / self.plays - self.mean_score ** 2
+        return var ** 0.5 if var > 0 else 0.0
+
+    def outcome_counts(self) -> tuple[float, float, float, float]:
+        """拆成 (走空赢, 堵死赢, 走空输, 堵死输)。平局单独由 ``ties`` 记。"""
+        wins_blocked = self.wins_blocked
+        wins_out = self.wins - wins_blocked
+        # 平局只可能出现在堵死局（winner < 0 仅由 _finish_blocked 产生）
+        losses_blocked = self.blocked_plays - wins_blocked - self.ties
+        losses_out = self.plays - self.blocked_plays - wins_out
+        return wins_out, wins_blocked, losses_out, losses_blocked
+
+    def ev(self, payout: PayoutModel) -> float:
+        """按赔付表折算的每局期望收益（底注为单位）。"""
+        if not self.plays:
+            return 0.0
+        w_out, w_blk, l_out, l_blk = self.outcome_counts()
+        total = (
+            w_out * payout.win_out
+            + w_blk * payout.win_blocked
+            + l_out * payout.lose_out
+            + l_blk * payout.lose_blocked
+            + self.ties * payout.tie
+        )
+        return total / self.plays
 
 
 # ---------------------------------------------------------------------------
@@ -264,19 +323,27 @@ def rank_actions(
             while not scratch.is_over:
                 scratch.step(policy(scratch))
             scores = scratch.scores()
+            blocked = scratch.blocked
             st.plays += 1
             st.score_sum += scores[me]
             st._score_sq += scores[me] * scores[me]
+            if blocked:
+                st.blocked_plays += 1
             if scratch.winner == me:
                 st.wins += 1
+                if blocked:
+                    st.wins_blocked += 1
             elif scratch.winner < 0:
                 st.ties += 1
 
-    return sorted(
-        stats.values(),
-        key=lambda s: (s.win_rate, s.mean_score, -s.action),
-        reverse=True,
-    )
+    if pimc.objective == "ev":
+        payout = pimc.payout or PayoutModel()
+        key = lambda s: (s.ev(payout), s.win_rate, -s.action)  # noqa: E731
+    elif pimc.objective == "win_rate":
+        key = lambda s: (s.win_rate, s.mean_score, -s.action)  # noqa: E731
+    else:
+        raise ValueError(f"未知 objective: {pimc.objective}（可选 win_rate / ev）")
+    return sorted(stats.values(), key=key, reverse=True)
 
 
 def _fit_counts(counts: dict[int, int], total: int) -> dict[int, int]:

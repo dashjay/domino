@@ -9,9 +9,9 @@ import random
 import sys
 import time
 
-from domimo.config import GameConfig
-from domimo.engine import DominoEngine
-from domimo.tiles import iter_tiles
+from domino.config import GameConfig
+from domino.engine import DominoEngine
+from domino.tiles import iter_tiles
 
 
 def main() -> None:

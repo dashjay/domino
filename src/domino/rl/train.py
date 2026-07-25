@@ -1,8 +1,8 @@
 """PPO 自博弈训练主循环。
 
 用法：
-    python3 -m domimo.rl.train --total-games 200000 --out runs/ppo_v1
-    python3 -m domimo.rl.train --smoke   # 快速冒烟
+    python3 -m domino.rl.train --total-games 200000 --out runs/ppo_v1
+    python3 -m domino.rl.train --smoke   # 快速冒烟
 
 架构：
     主进程：PPO 更新 + 定期评估 + checkpoint

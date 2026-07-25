@@ -1,13 +1,13 @@
 """人机对战 CLI：你执一家，其余座位由指定 agent 执棋。
 
 用法：
-    python3 -m domimo.cli.play                                    # 默认 counting + TUI
-    python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt  # 对战最强模型
-    python3 -m domimo.cli.play --opponents counting               # 对战记牌启发式
-    python3 -m domimo.cli.play --opponents counting,w_stuck_next=90 --ui plain
-    python3 -m domimo.cli.play --opponents nn:models/ppo_best.pt,greedy=0 \\
+    python3 -m domino.cli.play                                    # 默认 counting + TUI
+    python3 -m domino.cli.play --opponents nn:models/ppo_best.pt  # 对战最强模型
+    python3 -m domino.cli.play --opponents counting               # 对战记牌启发式
+    python3 -m domino.cli.play --opponents counting,w_stuck_next=90 --ui plain
+    python3 -m domino.cli.play --opponents nn:models/ppo_best.pt,greedy=0 \\
         --seat 2 --seed 42 --delay 0.5 --auto-pass
-    python3 -m domimo.cli.play --opponents counting greedy nn:models/ppo_best.pt
+    python3 -m domino.cli.play --opponents counting greedy nn:models/ppo_best.pt
 """
 
 from __future__ import annotations
