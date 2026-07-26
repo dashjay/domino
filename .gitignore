@@ -9,3 +9,5 @@ runs/
 *.pt
 .venv/
 domino-mc.jsonl
+
+domino-games.sqlite3*

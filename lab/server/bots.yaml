@@ -1,0 +1,17 @@
+bots:
+  - id: random_go
+    name: random_go
+    base_url: http://127.0.0.1:9200
+  - id: counting
+    name: counting
+    base_url: http://127.0.0.1:9101
+  - id: greedy
+    name: greedy
+    base_url: http://127.0.0.1:9102
+  - id: random_py
+    name: random
+    base_url: http://127.0.0.1:9103
+  - id: mc
+    name: mc
+    base_url: http://127.0.0.1:9104
+    timeout_ms: 8000

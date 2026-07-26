@@ -13,6 +13,7 @@ from domino.mc.pimc import (
     legal_actions_for,
     make_policy,
     rank_actions,
+    sample_adversarial_deal,
     sample_deal,
 )
 from domino.tiles import build_pips_table, tile_id
@@ -145,13 +146,36 @@ def test_make_policy_unknown():
         make_policy("does-not-exist")
 
 
-@pytest.mark.parametrize("name", ["random", "greedy", "counting"])
+@pytest.mark.parametrize("name", ["random", "greedy", "counting", "mixed"])
 def test_make_policy_returns_legal(name):
-    policy = make_policy(name, seed=1)
+    policy = make_policy(name, seed=1, me=0)
     eng = DominoEngine(CFG)
     eng.reset(seed=3)
     a = policy(eng)
     assert (eng.legal_actions() >> a) & 1
+
+
+def test_sample_adversarial_deal_respects_missing():
+    pips = build_pips_table(6)
+    my_hand = 1 << tile_id(6, 6)
+    played = 1 << tile_id(3, 3)
+    unseen = [
+        t for t in range(28)
+        if not ((my_hand >> t) & 1) and not ((played >> t) & 1)
+    ]
+    assert len(unseen) == 26
+    counts = {1: 9, 2: 9, 3: 8}
+    missing = [0, 1 << 0, 0, 0]  # 下家缺 0
+    deal = sample_adversarial_deal(
+        unseen, [1, 2, 3], counts, missing, pips, random.Random(1),
+        next_seat=1, left_end=3, right_end=5, my_hand=my_hand,
+        candidates=4,
+    )
+    assert deal is not None
+    for t in range(28):
+        if (deal[1] >> t) & 1:
+            a, b = pips[t]
+            assert a != 0 and b != 0
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +279,7 @@ def test_ev_matches_payout_definition():
         assert s.ev(payout) == pytest.approx(expect)
 
 
-def test_ev_objective_sorts_by_ev():
+def test_ev_objective_sorts_by_ranking_ev():
     from domino.mc.pimc import PayoutModel
 
     state = _mid_state(
@@ -265,12 +289,13 @@ def test_ev_objective_sorts_by_ev():
     )
     cfg = PIMCConfig(n_sims=200, rollout="greedy", seed=7, objective="ev")
     rk = rank_actions(state, CFG, cfg)
-    evs = [s.ev(PayoutModel()) for s in rk]
+    payout = PayoutModel()
+    evs = [s.ranking_ev(payout, cfg) for s in rk]
     assert evs == sorted(evs, reverse=True)
 
 
 def test_ev_payout_all_wins_equal_reduces_to_win_rate():
-    """把走空/堵死赔付调成一样时，EV 排序必须退化为纯胜率排序。"""
+    """把走空/堵死赔付调成一样且关闭 underdog 偏置时，EV 排序退化为纯胜率。"""
     from domino.mc.pimc import PayoutModel
 
     flat = PayoutModel(win_out=1.0, win_blocked=1.0, lose_out=0.0, lose_blocked=0.0)
@@ -281,11 +306,31 @@ def test_ev_payout_all_wins_equal_reduces_to_win_rate():
     )
     rk = rank_actions(
         state, CFG,
-        PIMCConfig(n_sims=200, rollout="greedy", seed=11, objective="ev", payout=flat),
+        PIMCConfig(
+            n_sims=200, rollout="greedy", seed=11, objective="ev", payout=flat,
+            underdog_wr=0.0, deal_candidates=1,
+        ),
     )
     for s in rk:
         assert s.ev(flat) == pytest.approx(s.win_rate)
     assert [s.win_rate for s in rk] == sorted([s.win_rate for s in rk], reverse=True)
+
+
+def test_underdog_ranking_prefers_higher_block_rate():
+    """低胜率时 ranking_ev 应对更高堵死率给正加成。"""
+    from domino.mc.pimc import ActionStat, PayoutModel
+
+    cfg = PIMCConfig(objective="ev", underdog_wr=0.30, underdog_block_bonus=0.55)
+    payout = PayoutModel()
+    low_block = ActionStat(0, (1, 2), 0, False)
+    high_block = ActionStat(1, (3, 4), 0, False)
+    for st, br in ((low_block, 0.1), (high_block, 0.7)):
+        st.plays = 100
+        st.wins = 20
+        st.blocked_plays = br * 100
+        st.wins_blocked = 5
+        st.end_pip_sum = 800
+    assert high_block.ranking_ev(payout, cfg) > low_block.ranking_ev(payout, cfg)
 
 
 def test_unknown_objective_rejected():

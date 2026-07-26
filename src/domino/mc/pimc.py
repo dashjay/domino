@@ -2,6 +2,12 @@
 
 与项目其它部分一致，牌集合用位图整数表示，动作编码为 ``tile_id*2 + side``
 （见 engine.py）。本模块只使用公开信息推断对手可能的手牌，不读取任何真实隐藏手牌。
+
+相对「纯 counting 自对弈」的增强（针对真人桌实盘校准偏乐观）：
+
+1. ``rollout="mixed"``：我方用 counting，对手混入更凶的 denial / greedy；
+2. 对抗性发牌：每次模拟在多种合规发牌里挑「下家威胁更大」的一副；
+3. ``objective="ev"`` 时对低胜率着法加堵死/留小牌偏置，避免死冲走空。
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ from dataclasses import dataclass, field
 
 from ..config import GameConfig
 from ..engine import DominoEngine
-from ..tiles import build_pips_table
+from ..tiles import build_pips_table, pip_sum
 
 
 # ---------------------------------------------------------------------------
@@ -67,12 +73,19 @@ class PIMCConfig:
     """PIMC 搜索超参。"""
 
     n_sims: int = 400          # 确定化抽样次数（越大越稳，越慢）
-    rollout: str = "counting"  # 模拟阶段各家出牌策略：random / greedy / counting
-                               # counting 最强（准确建模对手），greedy 最快
+    rollout: str = "mixed"     # random / greedy / counting / mixed
+                               # mixed：我方 counting，对手混 denial（更贴近真人）
     seed: int = 0
     max_deal_tries: int = 40   # 单次确定化在满足约束下的最大重试
+    deal_candidates: int = 3   # 每次模拟抽几副合规牌，挑对下家威胁最大的
     objective: str = "win_rate"  # 排序目标：win_rate（纯胜率）或 ev（按赔付表算期望收益）
     payout: PayoutModel | None = None  # objective="ev" 时生效，None 用默认赔付表
+    # ev 排序：预测胜率低于该阈值时，给「堵死 + 留小牌」加分（纠正冲走空偏见）
+    # 取 0.25 是因为 PayoutModel 推出的堵死收益零点就在 25%（见其 docstring）：
+    # 高于 25% 抢走空才是对的，此时不应再有堵死奖励。
+    underdog_wr: float = 0.25
+    underdog_block_bonus: float = 0.55
+    underdog_pip_bonus: float = 0.025
 
 
 @dataclass
@@ -89,6 +102,7 @@ class ActionStat:
     score_sum: float = 0.0
     blocked_plays: float = 0.0  # 模拟终局为「堵死」的次数
     wins_blocked: float = 0.0   # 其中我方获胜的次数
+    end_pip_sum: float = 0.0    # 终局我方剩余点数之和（用于留小牌排序）
     _score_sq: float = field(default=0.0, repr=False)
 
     @property
@@ -102,6 +116,10 @@ class ActionStat:
     @property
     def mean_score(self) -> float:
         return self.score_sum / self.plays if self.plays else 0.0
+
+    @property
+    def mean_end_pips(self) -> float:
+        return self.end_pip_sum / self.plays if self.plays else 0.0
 
     @property
     def blocked_rate(self) -> float:
@@ -138,13 +156,36 @@ class ActionStat:
         )
         return total / self.plays
 
+    def ranking_ev(self, payout: PayoutModel, cfg: PIMCConfig) -> float:
+        """用于排序的 EV：低胜率时奖励堵死率、惩罚终局剩余大点数。"""
+        base = self.ev(payout)
+        wr = self.win_rate
+        thr = cfg.underdog_wr
+        if wr >= thr or thr <= 0:
+            return base
+        underdog = (thr - wr) / thr
+        # 剩余点数相对「一手均 7 点」的节约（越高越好）
+        pip_save = max(0.0, 8.0 - self.mean_end_pips)
+        return (
+            base
+            + underdog * cfg.underdog_block_bonus * self.blocked_rate
+            + underdog * cfg.underdog_pip_bonus * pip_save
+        )
+
 
 # ---------------------------------------------------------------------------
 # 模拟阶段的出牌策略
 # ---------------------------------------------------------------------------
 
-def make_policy(name: str, seed: int = 0):
-    """构造模拟阶段用的出牌策略 callable(eng) -> action。"""
+_ROLLOUT_NAMES = ("random", "greedy", "counting", "mixed")
+
+
+def make_policy(name: str, seed: int = 0, me: int | None = None):
+    """构造模拟阶段用的出牌策略 callable(eng) -> action。
+
+    ``mixed``：我方（``me``）用标准 counting；其余座位按局随机混入
+    denial（更重堵下家/甩双）与 greedy，避免「三家都是 counting」的乐观偏差。
+    """
     name = (name or "greedy").lower()
     if name == "random":
         from ..agents.random_agent import RandomAgent
@@ -158,7 +199,38 @@ def make_policy(name: str, seed: int = 0):
         from ..agents.counting_agent import CountingAgent
 
         return CountingAgent().act
-    raise ValueError(f"未知 rollout 策略: {name}（可选 random/greedy/counting）")
+    if name == "mixed":
+        from ..agents.counting_agent import CountingAgent
+        from ..agents.greedy_agent import GreedyAgent
+
+        counting = CountingAgent().act
+        # 更凶：优先堵下家、早甩双，少顾自己灵活性（贴近真人卡花色）
+        denial = CountingAgent(
+            w_pip=2.2,
+            w_double=55.0,
+            w_stuck_next=115.0,
+            w_stuck_others=20.0,
+            w_flex=14.0,
+            w_diversity=2.0,
+            w_urgency=1.6,
+        ).act
+        greedy = GreedyAgent().act
+        rng = random.Random(seed ^ 0xA5A5_5A5A)
+
+        def policy(eng: DominoEngine) -> int:
+            if me is not None and eng.current_player == me:
+                return counting(eng)
+            u = rng.random()
+            if u < 0.48:
+                return denial(eng)
+            if u < 0.82:
+                return counting(eng)
+            return greedy(eng)
+
+        return policy
+    raise ValueError(
+        f"未知 rollout 策略: {name}（可选 {'/'.join(_ROLLOUT_NAMES)}）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +306,98 @@ def _relaxed_deal(
     return hands
 
 
+def _hand_threat(
+    hand: int,
+    left: int,
+    right: int,
+    pips: tuple[tuple[int, int], ...],
+    hot_pips: int,
+) -> int:
+    """一副对手手牌对我们的威胁分：能接当前端 / 持有热点数字（我方双牌花色）。"""
+    score = 0
+    mask = hand
+    while mask:
+        bit = mask & -mask
+        tid = bit.bit_length() - 1
+        mask ^= bit
+        a, b = pips[tid]
+        if left >= 0 and (a == left or b == left or a == right or b == right):
+            score += 3
+            if a == b:
+                score += 2  # 端点双牌更凶
+        elif left < 0 and a == b and a >= 4:
+            score += 2  # 开局：下家大金双也危险
+        if ((hot_pips >> a) & 1) or ((hot_pips >> b) & 1):
+            score += 1
+            if a == b:
+                score += 1
+    return score
+
+
+def _my_hot_pips(my_hand: int, pips: tuple[tuple[int, int], ...]) -> int:
+    """我手牌里的双牌点数 + 高频点数，对手拿这些花色更能卡我。"""
+    hot = 0
+    counts = [0] * 8
+    mask = my_hand
+    while mask:
+        bit = mask & -mask
+        tid = bit.bit_length() - 1
+        mask ^= bit
+        a, b = pips[tid]
+        if a == b:
+            hot |= 1 << a
+        counts[a] += 1
+        counts[b] += 1
+    for pip, c in enumerate(counts):
+        if c >= 2:
+            hot |= 1 << pip
+    return hot
+
+
+def sample_adversarial_deal(
+    unseen: list[int],
+    opp_seats: list[int],
+    counts: dict[int, int],
+    missing: list[int],
+    pips: tuple[tuple[int, int], ...],
+    rng: random.Random,
+    *,
+    next_seat: int,
+    left_end: int,
+    right_end: int,
+    my_hand: int,
+    max_tries: int = 40,
+    candidates: int = 3,
+) -> dict[int, int] | None:
+    """抽多副合规牌，选对「下家」威胁最大的一副（空 missing 时尤其重要）。"""
+    if candidates <= 1:
+        return sample_deal(
+            unseen, opp_seats, counts, missing, pips, rng, max_tries=max_tries
+        )
+    hot = _my_hot_pips(my_hand, pips)
+    best: dict[int, int] | None = None
+    best_score = -1
+    for _ in range(candidates):
+        deal = sample_deal(
+            unseen, opp_seats, counts, missing, pips, rng, max_tries=max_tries
+        )
+        if deal is None:
+            break
+        score = _hand_threat(
+            deal.get(next_seat, 0), left_end, right_end, pips, hot
+        )
+        # 对家（隔一位）的接应能力也计入，权重较低
+        across = (next_seat + 1) % (len(missing) or 4)
+        if across in deal:
+            score += _hand_threat(
+                deal[across], left_end, right_end, pips, hot
+            ) // 2
+        if score > best_score:
+            best_score = score
+            best = deal
+    return best
+
+
 # ---------------------------------------------------------------------------
 # 局面复原与模拟
 # ---------------------------------------------------------------------------
@@ -299,16 +463,28 @@ def rank_actions(
 
     # 未见牌数应等于对手手牌数之和；否则无法做合规确定化，退回按张数兜底
     strict = sum(counts.values()) == len(unseen)
+    next_seat = (me + 1) % cfg.num_players
+    deal_candidates = max(1, int(pimc.deal_candidates))
 
     scratch = DominoEngine(cfg)
-    policy = make_policy(pimc.rollout, seed=pimc.seed)
+    policy = make_policy(pimc.rollout, seed=pimc.seed, me=me)
 
     for _ in range(pimc.n_sims):
         deal = None
         if strict:
-            deal = sample_deal(
-                unseen, opp_seats, counts, state.missing_pips, pips, rng,
+            deal = sample_adversarial_deal(
+                unseen,
+                opp_seats,
+                counts,
+                state.missing_pips,
+                pips,
+                rng,
+                next_seat=next_seat,
+                left_end=state.left_end,
+                right_end=state.right_end,
+                my_hand=state.my_hand,
                 max_tries=pimc.max_deal_tries,
+                candidates=deal_candidates,
             )
         if deal is None:
             deal = _relaxed_deal(unseen, opp_seats, _fit_counts(counts, len(unseen)), rng)
@@ -327,6 +503,7 @@ def rank_actions(
             st.plays += 1
             st.score_sum += scores[me]
             st._score_sq += scores[me] * scores[me]
+            st.end_pip_sum += pip_sum(scratch.hands[me], scratch.pips)
             if blocked:
                 st.blocked_plays += 1
             if scratch.winner == me:
@@ -338,9 +515,15 @@ def rank_actions(
 
     if pimc.objective == "ev":
         payout = pimc.payout or PayoutModel()
-        key = lambda s: (s.ev(payout), s.win_rate, -s.action)  # noqa: E731
+        key = lambda s: (  # noqa: E731
+            s.ranking_ev(payout, pimc),
+            s.blocked_rate if s.win_rate < pimc.underdog_wr else 0.0,
+            -s.mean_end_pips,
+            s.win_rate,
+            -s.action,
+        )
     elif pimc.objective == "win_rate":
-        key = lambda s: (s.win_rate, s.mean_score, -s.action)  # noqa: E731
+        key = lambda s: (s.win_rate, s.mean_score, -s.mean_end_pips, -s.action)  # noqa: E731
     else:
         raise ValueError(f"未知 objective: {pimc.objective}（可选 win_rate / ev）")
     return sorted(stats.values(), key=key, reverse=True)

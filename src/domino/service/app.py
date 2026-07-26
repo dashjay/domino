@@ -9,7 +9,7 @@
       "opponent_hand_counts": [7, 7, 7],
       "missing": [[], [], []],
       "num_players": 4, "hand_size": 7, "max_pip": 6,
-      "simulations": 400, "rollout": "counting", "seed": 0
+      "simulations": 400, "rollout": "mixed", "seed": 0
     }
 
 字段说明：
@@ -40,6 +40,7 @@ from ..config import GameConfig
 from ..mc.pimc import PayoutModel, PIMCConfig, PublicState, rank_actions
 from ..tiles import num_tiles, tile_id
 from .decision_log import DecisionLog
+from .game_store import GameStore, IngestError
 
 
 class AnalyzeError(ValueError):
@@ -254,9 +255,10 @@ def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConf
     n_sims = int(payload.get("simulations", payload.get("n_sims", 400)))
     if n_sims < 1:
         raise AnalyzeError("simulations 至少为 1")
-    rollout = str(payload.get("rollout", "counting"))
-    if rollout not in ("random", "greedy", "counting"):
-        raise AnalyzeError("rollout 只能是 random / greedy / counting")
+    # mixed：对手混 denial，比纯 counting 自对弈更贴近真人（默认）
+    rollout = str(payload.get("rollout", "mixed"))
+    if rollout not in ("random", "greedy", "counting", "mixed"):
+        raise AnalyzeError("rollout 只能是 random / greedy / counting / mixed")
     seed = payload.get("seed")
     seed = random.randrange(1 << 30) if seed is None else int(seed)
 
@@ -265,12 +267,17 @@ def build_public_state(payload: dict) -> tuple[PublicState, GameConfig, PIMCConf
         raise AnalyzeError("objective 只能是 win_rate / ev")
     payout = _parse_payout(payload.get("payout"))
 
+    deal_candidates = int(payload.get("deal_candidates", 3))
+    if deal_candidates < 1:
+        raise AnalyzeError("deal_candidates 至少为 1")
+
     pimc = PIMCConfig(
         n_sims=n_sims,
         rollout=rollout,
         seed=seed,
         objective=objective,
         payout=payout,
+        deal_candidates=deal_candidates,
     )
     return state, cfg, pimc
 
@@ -356,17 +363,22 @@ pre{padding:1rem;overflow:auto}code{padding:.1rem .3rem}
   "hand":  [[6,6],[3,4],[1,5],[0,4],[2,2],[0,1],[5,6]],
   "board": [[3,5]],
   "simulations": 400,
-  "rollout": "counting"
+  "rollout": "mixed"
 }'</pre>
 </html>"""
 
 
-def build_handler(decision_log: DecisionLog | None = None):
+def build_handler(
+    decision_log: DecisionLog | None = None,
+    game_store: GameStore | None = None,
+):
     log = decision_log
+    store = game_store
 
     class AnalyzeHandler(BaseHTTPRequestHandler):
         server_version = "domino-mc/0.1"
         decision_log = log
+        game_store = store
 
         def _send_json(self, code: int, obj: dict) -> None:
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -433,6 +445,9 @@ def build_handler(decision_log: DecisionLog | None = None):
             if path == "/feedback":
                 self._handle_feedback(started)
                 return
+            if path == "/ingest":
+                self._handle_ingest(started)
+                return
             if path != "/analyze":
                 self._send_json(404, {"ok": False, "error": "not found"})
                 self._access_log("POST", path, 404, started)
@@ -487,6 +502,35 @@ def build_handler(decision_log: DecisionLog | None = None):
             self._send_json(200, {"ok": True, "recorded": record})
             self._access_log("POST", path, 200, started, input_=payload)
 
+        def _handle_ingest(self, started: float) -> None:
+            path = "/ingest"
+            if self.game_store is None:
+                self._send_json(
+                    503, {"ok": False, "error": "未启用对局存储（启动时加 --db）"}
+                )
+                self._access_log("POST", path, 503, started, error="db disabled")
+                return
+            payload, err, raw = self._read_json()
+            if err is not None:
+                self._send_json(400, {"ok": False, "error": err})
+                self._access_log(
+                    "POST", path, 400, started, input_=raw.decode("utf-8", "replace"), error=err
+                )
+                return
+            try:
+                recorded = self.game_store.ingest(payload)
+            except IngestError as e:
+                self._send_json(400, {"ok": False, "error": str(e)})
+                self._access_log("POST", path, 400, started, input_=payload, error=str(e))
+                return
+            except Exception as e:  # noqa: BLE001
+                err = f"内部错误: {e}"
+                self._send_json(500, {"ok": False, "error": err})
+                self._access_log("POST", path, 500, started, input_=payload, error=err)
+                return
+            self._send_json(200, {"ok": True, "recorded": recorded})
+            self._access_log("POST", path, 200, started, input_=payload)
+
         def log_message(self, fmt: str, *args) -> None:  # 静默默认访问日志（用 _access_log）
             pass
 
@@ -497,19 +541,27 @@ def run_server(
     host: str = "0.0.0.0",
     port: int = 8000,
     log_path: str | None = "domino-mc.jsonl",
+    db_path: str | None = "domino-games.sqlite3",
 ) -> None:
     decision_log = DecisionLog(log_path) if log_path else None
-    handler = build_handler(decision_log)
+    game_store = GameStore(db_path) if db_path else None
+    handler = build_handler(decision_log, game_store)
     httpd = ThreadingHTTPServer((host, port), handler)
     endpoints = "POST /analyze, GET /health"
     if decision_log is not None:
         endpoints += ", POST /feedback"
+    if game_store is not None:
+        endpoints += ", POST /ingest"
     print(f"[domino-mc] 监听 http://{host}:{port}  ({endpoints})")
     if decision_log is not None:
         print(f"[domino-mc] 决策日志 → {decision_log.path.resolve()}")
+    if game_store is not None:
+        print(f"[domino-mc] 对局数据库 → {game_store.path.resolve()}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\n[domino-mc] 已停止")
     finally:
         httpd.server_close()
+        if game_store is not None:
+            game_store.close()
